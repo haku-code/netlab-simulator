@@ -60,7 +60,15 @@ export interface Network {
   /** 例: 192.168.1.0/24 */
   cidr: string;
   gatewayIp: string;
-  dhcp: { enabled: boolean; start: string; end: string };
+  dhcp: {
+    enabled: boolean;
+    start: string;
+    end: string;
+    /** リース期間 (秒)。未指定は 86400 */
+    leaseTime?: number;
+    /** 配る DNS サーバー。未指定・空ならゲートウェイ */
+    dns?: string[];
+  };
   /** Isolate Network: 他の内部ネットワークとの通信を遮断 */
   isolateNetwork: boolean;
   internetAccess: boolean;
@@ -86,18 +94,43 @@ export interface WifiSsid {
   bands: ("2.4" | "5" | "6")[];
 }
 
+/** 接続状態: all = 新規も戻りも / new = 新規の接続だけ / established = 確立済み（戻りの通信）だけ */
+export type ConnState = "all" | "new" | "established";
+
+/** 曜日 (0=日〜6=土) と時刻の範囲。end < start なら日をまたぐ */
+export interface Schedule {
+  days: number[];
+  start: string;
+  end: string;
+}
+
 export interface FirewallPolicy {
   id: string;
   name: string;
   action: "allow" | "block";
   srcZone: string;
-  /** "any" / ネットワーク ID / "client:<端末 ID>"（端末単位） */
+  /** "any" / ネットワーク ID / "client:<端末 ID>" / "group:<オブジェクト ID>" */
   src: string;
   dstZone: string;
   dst: string;
   protocol: "all" | Protocol;
   port: number | null;
+  /** ポートリスト（オブジェクト）。指定すると port より優先 */
+  portListId?: string;
   enabled: boolean;
+  /** 未指定は "all" */
+  connState?: ConnState;
+  /** 未指定は常時 */
+  schedule?: Schedule;
+}
+
+/** ポリシーで使うオブジェクト（端末グループ / IP グループ / ポートリスト） */
+export interface PolicyObject {
+  id: string;
+  name: string;
+  kind: "devices" | "ips" | "ports";
+  /** 端末 ID / IP・CIDR / ポート番号 */
+  values: string[];
 }
 
 export type ClientKind = "pc" | "phone" | "iot" | "server" | "printer" | "tv";
@@ -128,6 +161,8 @@ export interface Client {
   wifiPassword: string;
   /** WPA3 に対応しているか（古い TV や IoT 機器は非対応） */
   wpa3: boolean;
+  /** DHCP 予約: DHCP で常にこの IP を割り当てる（UniFi の Fixed IP Address） */
+  reservedIp?: string;
   /** フロアプラン上の位置 (m) */
   pos?: XY;
 }
@@ -145,6 +180,9 @@ export interface Scenario {
   mdns?: { enabled: boolean; networkIds: string[] };
   /** 間取り。あると無線は位置と電波強度で AP を選ぶ */
   floor?: Floor;
+  objects?: PolicyObject[];
+  /** シミュレーション上の現在時刻（スケジュール付きポリシーの判定に使う） */
+  clock?: { day: number; time: string };
 }
 
 export const BUILTIN_ZONES: Zone[] = [

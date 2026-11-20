@@ -64,6 +64,8 @@ export function validate(s: Scenario): Issue[] {
     if (gw === null || !isHostAddr(gw, sn))
       add("error", `ゲートウェイ IP ${n.gatewayIp} がサブネット内の有効なホストアドレスではありません`, "通常はサブネットの最初のアドレス (例: .1) を使います。");
 
+    for (const d of n.dhcp.dns ?? [])
+      if (d.trim() && parseIp(d) === null) add("error", `DNS サーバー「${d}」が IP アドレスの形式ではありません`);
     if (n.dhcp.enabled) {
       const st = parseIp(n.dhcp.start);
       const en = parseIp(n.dhcp.end);
@@ -109,6 +111,16 @@ export function validate(s: Scenario): Issue[] {
       out.push({ severity: "warning", area: "wifi", targetId: w.id, message: `SSID「${w.name}」はどの AP からも配信されていません`, hint: "配信 AP で配信する AP を選びます。" });
     if (w.security === "open")
       out.push({ severity: "warning", area: "wifi", targetId: w.id, message: `SSID「${w.name}」は暗号化なし (オープン) です`, hint: "ゲスト用でも WPA2/WPA3 を推奨します。" });
+  }
+
+  // --- DHCP 予約 ---
+  const resSeen = new Map<string, string>();
+  for (const c of s.clients) {
+    if (c.ipMode !== "dhcp" || !c.reservedIp) continue;
+    const key = c.reservedIp.trim();
+    if (resSeen.has(key))
+      out.push({ severity: "error", area: "clients", targetId: c.id, message: `${c.name}: DHCP 予約 ${key} が「${resSeen.get(key)}」と重複しています` });
+    else resSeen.set(key, c.name);
   }
 
   // --- クライアント ---

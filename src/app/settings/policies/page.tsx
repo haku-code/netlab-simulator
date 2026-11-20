@@ -6,7 +6,8 @@ import { useEffect, useState } from "react";
 import { Button, Field, Input, Notice, PageHeader, Segmented, Select, SidePanel, Term, Toggle, table as t, useDraft } from "@/components/ui";
 import { useIssues } from "@/lib/hooks";
 import { uid, type FirewallPolicy, type Scenario } from "@/lib/model";
-import { CLIENT_REF, clientNetworkId, clientRef, findNetwork, isClientRef, zoneDefault, zoneName } from "@/lib/net/simulate";
+import { CLIENT_REF, clientNetworkId, clientRef, findNetwork, findObject, isClientRef, isGroupRef, zoneDefault, zoneName } from "@/lib/net/simulate";
+import { ClockControl, DAYS, scheduleLabel } from "@/components/ClockControl";
 import { useStore } from "@/lib/store";
 
 const PROTO = [
@@ -19,6 +20,7 @@ const PROTO = [
 function refLabel(s: Scenario, ref: string) {
   if (ref === "any") return "指定なし";
   if (isClientRef(ref)) return s.clients.find((c) => c.id === ref.slice(CLIENT_REF.length))?.name ?? "(削除済みの端末)";
+  if (isGroupRef(ref)) return findObject(s, ref)?.name ?? "(削除済みのグループ)";
   return findNetwork(s, ref)?.name ?? "(削除済み)";
 }
 
@@ -62,6 +64,7 @@ export default function PoliciesPage() {
   return (
     <>
       <PageHeader title="ポリシー一覧" count={s.policies.length}>
+        <ClockControl />
         <Button variant="primary" onClick={() => setEdit("new")}>
           <Plus size={14} /> ポリシーを作成
         </Button>
@@ -115,6 +118,8 @@ export default function PoliciesPage() {
                   <td className={t.td}>
                     <span className="font-medium">{p.name}</span>
                     {warn && <span className="ml-2 text-[12px] text-warn">評価されません</span>}
+                    {p.schedule && <span className="ml-2 rounded bg-surface-2 px-1 text-[11px] text-muted ring-1 ring-line">{scheduleLabel(p.schedule)}</span>}
+                    {(p.connState ?? "all") !== "all" && <span className="ml-2 rounded bg-surface-2 px-1 text-[11px] text-muted ring-1 ring-line">{p.connState === "new" ? "新規のみ" : "戻りのみ"}</span>}
                   </td>
                   <td className={t.td}>
                     <span className={clsx("font-medium", p.action === "allow" ? "text-ok" : "text-err")}>{p.action === "allow" ? "許可" : "拒否"}</span>
@@ -123,7 +128,7 @@ export default function PoliciesPage() {
                   <td className={t.td}>{endpoint(s, p.dstZone, p.dst)}</td>
                   <td className={clsx(t.td, "text-fg-2")}>
                     {p.protocol === "all" ? "すべて" : p.protocol.toUpperCase()}
-                    {p.port !== null && ` / ${p.port}`}
+                    {p.portListId ? ` / ${s.objects?.find((o) => o.id === p.portListId)?.name ?? "?"}` : p.port !== null && ` / ${p.port}`}
                   </td>
                   <td className={t.td} onClick={(e) => e.stopPropagation()}>
                     <Toggle checked={p.enabled} onChange={(v) => mutate((sc) => (sc.policies[i].enabled = v))} />
@@ -179,6 +184,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
       { value: "any", label: "指定なし" },
       ...nets.map((n) => ({ value: n.id, label: `ネットワーク: ${n.name}` })),
       ...devices.map((c) => ({ value: clientRef(c.id), label: `端末: ${c.name}` })),
+      ...(s.objects ?? []).filter((o) => o.kind !== "ports").map((o) => ({ value: `group:${o.id}`, label: `グループ: ${o.name}` })),
     ];
   };
 
@@ -264,17 +270,70 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
           <Select value={draft.protocol} onChange={(v) => update((p) => ((p.protocol = v as FirewallPolicy["protocol"]), v === "icmp" && (p.port = null)))} options={PROTO} />
         </Field>
         <Field label="ポート" hint="空欄のままならすべてのポートが対象">
-          <Input
-            type="number"
-            min={1}
-            max={65535}
-            className="tnum"
-            disabled={draft.protocol === "icmp"}
-            value={draft.port ?? ""}
-            onChange={(e) => update((p) => (p.port = e.target.value === "" ? null : Number(e.target.value)))}
-          />
+          <div className="flex gap-1.5">
+            <Select
+              className="w-28 shrink-0"
+              disabled={draft.protocol === "icmp"}
+              value={draft.portListId ? `list:${draft.portListId}` : "num"}
+              onChange={(v) => update((p) => (p.portListId = v.startsWith("list:") ? v.slice(5) : undefined))}
+              options={[{ value: "num", label: "番号" }, ...(s.objects ?? []).filter((o) => o.kind === "ports").map((o) => ({ value: `list:${o.id}`, label: o.name }))]}
+            />
+            {!draft.portListId && (
+              <Input
+                type="number"
+                min={1}
+                max={65535}
+                className="tnum"
+                disabled={draft.protocol === "icmp"}
+                value={draft.port ?? ""}
+                onChange={(e) => update((p) => (p.port = e.target.value === "" ? null : Number(e.target.value)))}
+              />
+            )}
+          </div>
         </Field>
       </div>
+      <Field label="接続状態" term="stateful" hint="拒否ポリシーを「すべて」にすると、反対側から始めた通信の戻り（応答）まで止まります。">
+        <Select
+          value={draft.connState ?? "all"}
+          onChange={(v) => update((p) => (p.connState = v as FirewallPolicy["connState"]))}
+          options={[
+            { value: "all", label: "すべて（新規 + 戻り）" },
+            { value: "new", label: "新規の接続のみ" },
+            { value: "established", label: "確立済み（戻りの通信）のみ" },
+          ]}
+        />
+      </Field>
+      <Field label="スケジュール" hint="シミュレーション時刻はポリシー一覧の右上で変えられます。">
+        <Segmented<"always" | "custom">
+          value={draft.schedule ? "custom" : "always"}
+          onChange={(v) => update((p) => (p.schedule = v === "always" ? undefined : { days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }))}
+          options={[
+            { value: "always", label: "常時" },
+            { value: "custom", label: "指定する" },
+          ]}
+        />
+        {draft.schedule && (
+          <div className="mt-2 space-y-2 rounded border border-line p-2.5">
+            <div className="flex gap-1">
+              {DAYS.map((d, i) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => update((p) => (p.schedule!.days = p.schedule!.days.includes(i) ? p.schedule!.days.filter((x) => x !== i) : [...p.schedule!.days, i].sort()))}
+                  className={clsx("size-7 rounded text-[12px]", draft.schedule!.days.includes(i) ? "bg-accent text-white" : "bg-surface-2 text-muted hover:text-fg")}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <Input type="time" className="tnum w-32" value={draft.schedule.start} onChange={(e) => update((p) => (p.schedule!.start = e.target.value))} />
+              <span className="text-muted">〜</span>
+              <Input type="time" className="tnum w-32" value={draft.schedule.end} onChange={(e) => update((p) => (p.schedule!.end = e.target.value))} />
+            </div>
+          </div>
+        )}
+      </Field>
       <div className="flex items-center justify-between">
         <span>有効</span>
         <Toggle checked={draft.enabled} onChange={(v) => update((p) => (p.enabled = v))} />

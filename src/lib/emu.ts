@@ -9,7 +9,7 @@ export const LISTEN: Record<ClientKind, number[]> = {
   phone: [],
   tv: [7000, 8008, 8009],
   iot: [80, 554],
-  server: [80, 443, 445, 5000, 8123],
+  server: [53, 80, 443, 445, 5000, 8123],
   printer: [80, 443, 631, 9100],
 };
 
@@ -49,7 +49,10 @@ export function probe(s: Scenario, srcId: string, host: string, protocol: Protoc
   const src = resolveClient(s, srcId);
   if (src.error || !src.ip || !src.network) return { status: "noip", message: src.error ?? "ネットワークに接続されていません。" };
   const isName = parseIp(host) === null;
-  if (isName && !src.toGateway?.ok) return { status: "dns", message: "DNS サーバー (ゲートウェイ) に到達できないため、名前を解決できません。" };
+  if (isName) {
+    const dnsErr = dnsReachable(s, srcId);
+    if (dnsErr) return { status: "dns", message: dnsErr };
+  }
 
   const target = resolveTarget(s, host);
   if (target.kind === "unknown") {
@@ -75,6 +78,32 @@ export function probe(s: Scenario, srcId: string, host: string, protocol: Protoc
   if (target.kind === "client" && protocol !== "icmp" && port !== null && !LISTEN[target.client.kind].includes(port))
     return { status: "refused", target, hops: r.hops, routed };
   return { status: "ok", target, hops: r.hops, routed };
+}
+
+/** 端末が使う DNS サーバー（DHCP で配られたもの。手動設定の端末はゲートウェイ） */
+export function dnsServerOf(s: Scenario, clientId: string) {
+  const st = resolveClient(s, clientId);
+  const net = st.client.ipMode === "dhcp" && st.client.lease ? findNetwork(s, st.client.lease.networkId) : st.network;
+  return net?.dhcp.dns?.find((d) => d.trim()) ?? net?.gatewayIp;
+}
+
+/** DNS サーバーに問い合わせできるか。できなければ理由を返す */
+export function dnsReachable(s: Scenario, srcId: string): string | null {
+  const src = resolveClient(s, srcId);
+  const dns = dnsServerOf(s, srcId);
+  if (!dns) return "DNS サーバーが設定されていません。";
+  if (s.networks.some((n) => n.gatewayIp === dns)) return src.toGateway?.ok ? null : `DNS サーバー (ゲートウェイ ${dns}) に到達できないため、名前を解決できません。`;
+  if (parseIp(dns) === null) return `DNS サーバーの設定 (${dns}) が不正です。`;
+  const target = resolveTarget(s, dns);
+  if (target.kind === "client") {
+    const r = trace(s, { srcId, dst: target.client.id, protocol: "udp", port: 53 });
+    if (!r.ok) return `DNS サーバー ${dns} (${target.client.name}) に届きません: ${r.summary}`;
+    if (!LISTEN[target.client.kind].includes(53)) return `${target.client.name} (${dns}) は DNS サーバーとして動いていません。`;
+    return null;
+  }
+  if (target.kind === "unknown") return `DNS サーバー ${dns} が見つかりません。`;
+  const r = trace(s, { srcId, dst: "internet", protocol: "udp", port: 53 });
+  return r.ok ? null : `外部の DNS サーバー ${dns} に届きません: ${r.summary}`;
 }
 
 // --- ping / traceroute -------------------------------------------------------
@@ -149,6 +178,8 @@ export interface NetInfo {
   router?: string;
   dns?: string;
   ssidName?: string;
+  /** DHCP のリース期間 (秒) */
+  leaseTime?: number;
   radio?: string;
   wifi: ReturnType<typeof radioLink>;
   linkLabel: string;
@@ -171,7 +202,8 @@ export function netInfo(s: Scenario, clientId: string): NetInfo {
     ip: st.ip,
     mask: st.ip ? mask : undefined,
     router: st.ip ? leaseNet?.gatewayIp : undefined,
-    dns: st.ip ? leaseNet?.gatewayIp : undefined,
+    dns: st.ip ? (leaseNet?.dhcp.dns?.find((d) => d.trim()) ?? leaseNet?.gatewayIp) : undefined,
+    leaseTime: c.ipMode === "dhcp" && st.ip ? (leaseNet?.dhcp.leaseTime ?? 86400) : undefined,
     ssidName: ssid?.name,
     radio: radio ? `${apName} · ${radio.band} GHz · ch ${radio.channel} · ${radio.rssi} dBm · ${radio.rate} Mbps` : undefined,
     wifi: radio,

@@ -374,8 +374,20 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
   const gwIp = parseIp(net.gatewayIp);
   if (gwIp !== null) reserved.add(gwIp);
   for (const o of s.clients) {
+    if (o.id === client.id) continue;
     const n = o.ipMode === "static" ? parseIp(o.staticIp) : o.lease ? parseIp(o.lease.ip) : null;
     if (n !== null) reserved.add(n);
+    // 他の端末の DHCP 予約もプールから除外する
+    const r = o.ipMode === "dhcp" && o.reservedIp ? parseIp(o.reservedIp) : null;
+    if (r !== null) reserved.add(r);
+  }
+  // DHCP 予約: この端末には常に決まった IP を配る
+  if (client.reservedIp) {
+    const r = parseIp(client.reservedIp);
+    if (r === null || !isHostAddr(r, sn) || r === gwIp)
+      return { ...st, error: `DHCP 予約の IP ${client.reservedIp} は ${net.name} (${net.cidr}) で使えません。`, errorStage: "ip" };
+    if (reserved.has(r)) return { ...st, error: `DHCP 予約の IP ${client.reservedIp} は他の端末が使用中です。`, errorStage: "ip" };
+    return { ...st, ip: ipToStr(r) };
   }
   // まだリースを持たない端末同士で、順番にプールから割り当てる
   const sameNetDhcp = s.clients.filter((o) => {
@@ -445,25 +457,74 @@ export function zoneDefault(srcZone: string, dstZone: string): "allow" | "block"
   return "block";
 }
 
-export function policyMatches(
-  s: Scenario,
-  p: FirewallPolicy,
-  srcNetId: string,
-  dst: Dest,
-  protocol: Protocol,
-  port: number | null,
-  srcClientId?: string,
-): boolean {
-  if (!p.enabled) return false;
-  const dstZone = dst.kind === "internet" ? "external" : zoneOfNetwork(s, dst.id);
-  if (p.srcZone !== zoneOfNetwork(s, srcNetId) || p.dstZone !== dstZone) return false;
-  if (p.src !== "any" && (isClientRef(p.src) ? p.src !== clientRef(srcClientId ?? "") : p.src !== srcNetId)) return false;
-  if (p.dst !== "any") {
-    if (dst.kind === "internet") return false;
-    if (isClientRef(p.dst) ? p.dst !== clientRef(dst.clientId ?? "") : p.dst !== dst.id) return false;
+/** ポリシー判定の対象となる 1 つの通信 */
+export interface Flow {
+  srcZone: string;
+  srcNetId: string | null;
+  srcClientId: string | null;
+  srcIp: string | null;
+  dstZone: string;
+  dstNetId: string | null;
+  dstClientId: string | null;
+  dstIp: string | null;
+  protocol: Protocol;
+  port: number | null;
+  /** new = 新規の接続 / established = 確立済み接続の戻りの通信 */
+  state: "new" | "established";
+}
+
+export const GROUP_REF = "group:";
+export const isGroupRef = (ref: string) => ref.startsWith(GROUP_REF);
+export const findObject = (s: Scenario, ref: string) => s.objects?.find((o) => `${GROUP_REF}${o.id}` === ref);
+
+/** 送信元/宛先の参照が通信の端点に一致するか */
+function refMatches(s: Scenario, ref: string, netId: string | null, clientId: string | null, ip: string | null) {
+  if (ref === "any") return true;
+  if (isClientRef(ref)) return !!clientId && ref === clientRef(clientId);
+  if (isGroupRef(ref)) {
+    const o = findObject(s, ref);
+    if (!o) return false;
+    if (o.kind === "devices") return !!clientId && o.values.includes(clientId);
+    if (o.kind === "ips" && ip) {
+      const n = parseIp(ip);
+      return n !== null && o.values.some((v) => (v.includes("/") ? !!parseCidr(v) && inSubnet(n, parseCidr(v)!) : v.trim() === ip));
+    }
+    return false;
   }
-  if (p.protocol !== "all" && p.protocol !== protocol) return false;
-  if (p.port !== null && (protocol === "icmp" || port !== p.port)) return false;
+  return ref === netId;
+}
+
+const toMin = (t: string) => {
+  const [h, m] = t.split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+export const DEFAULT_CLOCK = { day: 1, time: "12:00" };
+
+/** スケジュールが現在時刻（シミュレーション上）に有効か。日をまたぐ範囲にも対応 */
+export function scheduleActive(sch: FirewallPolicy["schedule"], clock = DEFAULT_CLOCK) {
+  if (!sch) return true;
+  const now = toMin(clock.time);
+  const start = toMin(sch.start);
+  const end = toMin(sch.end);
+  if (start === end) return sch.days.includes(clock.day);
+  if (start < end) return sch.days.includes(clock.day) && now >= start && now < end;
+  // 22:00〜06:00 のように日をまたぐ: 開始日の夜 or 翌日の朝
+  return (sch.days.includes(clock.day) && now >= start) || (sch.days.includes((clock.day + 6) % 7) && now < end);
+}
+
+export function policyMatches(s: Scenario, p: FirewallPolicy, f: Flow): boolean {
+  if (!p.enabled) return false;
+  if (p.srcZone !== f.srcZone || p.dstZone !== f.dstZone) return false;
+  const st = p.connState ?? "all";
+  if (st !== "all" && st !== f.state) return false;
+  if (!scheduleActive(p.schedule, s.clock ?? DEFAULT_CLOCK)) return false;
+  if (!refMatches(s, p.src, f.srcNetId, f.srcClientId, f.srcIp)) return false;
+  if (!refMatches(s, p.dst, f.dstNetId, f.dstClientId, f.dstIp)) return false;
+  if (p.protocol !== "all" && p.protocol !== f.protocol) return false;
+  if (p.portListId) {
+    const list = s.objects?.find((o) => o.id === p.portListId);
+    if (f.protocol === "icmp" || f.port === null || !list?.values.includes(String(f.port))) return false;
+  } else if (p.port !== null && (f.protocol === "icmp" || f.port !== p.port)) return false;
   return true;
 }
 
@@ -475,12 +536,28 @@ export interface FirewallVerdict {
   dstZone: string;
 }
 
+/** 通信を評価: 上から順に最初に一致したポリシー。なければ新規はゾーン既定、戻りは許可（ステートフル） */
+export function evalFlow(s: Scenario, f: Flow): FirewallVerdict {
+  const index = s.policies.findIndex((p) => policyMatches(s, p, f));
+  if (index >= 0) return { allowed: s.policies[index].action === "allow", policy: s.policies[index], index, srcZone: f.srcZone, dstZone: f.dstZone };
+  return { allowed: f.state === "established" ? true : zoneDefault(f.srcZone, f.dstZone) === "allow", index: -1, srcZone: f.srcZone, dstZone: f.dstZone };
+}
+
+/** 互換用: ネットワーク間の新規通信を評価 */
 export function evalFirewall(s: Scenario, srcNetId: string, dst: Dest, protocol: Protocol, port: number | null, srcClientId?: string): FirewallVerdict {
-  const srcZone = zoneOfNetwork(s, srcNetId);
-  const dstZone = dst.kind === "internet" ? "external" : zoneOfNetwork(s, dst.id);
-  const index = s.policies.findIndex((p) => policyMatches(s, p, srcNetId, dst, protocol, port, srcClientId));
-  if (index >= 0) return { allowed: s.policies[index].action === "allow", policy: s.policies[index], index, srcZone, dstZone };
-  return { allowed: zoneDefault(srcZone, dstZone) === "allow", index: -1, srcZone, dstZone };
+  return evalFlow(s, {
+    srcZone: zoneOfNetwork(s, srcNetId),
+    srcNetId,
+    srcClientId: srcClientId ?? null,
+    srcIp: srcClientId ? (s.clients.some((c) => c.id === srcClientId) ? (resolveClient(s, srcClientId).ip ?? null) : null) : null,
+    dstZone: dst.kind === "internet" ? "external" : zoneOfNetwork(s, dst.id),
+    dstNetId: dst.kind === "internet" ? null : dst.id,
+    dstClientId: dst.kind === "internet" ? null : (dst.clientId ?? null),
+    dstIp: dst.kind === "internet" ? null : dst.clientId && s.clients.some((c) => c.id === dst.clientId) ? (resolveClient(s, dst.clientId).ip ?? null) : null,
+    protocol,
+    port,
+    state: "new",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -667,6 +744,38 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     return fw.allowed;
   };
 
+  /** 戻りの通信（確立済み接続）の判定。既定はステートフルに許可、接続状態「すべて」のブロックには引っかかる */
+  const returnTraffic = (from: { zone: string; netId: string | null; clientId: string | null; ip: string | null; label: string }): boolean => {
+    const fw = evalFlow(s, {
+      srcZone: from.zone,
+      srcNetId: from.netId,
+      srcClientId: from.clientId,
+      srcIp: from.ip,
+      dstZone: srcNet.zoneId,
+      dstNetId: srcNet.id,
+      dstClientId: src.client.id,
+      dstIp: src.ip ?? null,
+      protocol: q.protocol,
+      port: null,
+      state: "established",
+    });
+    if (fw.policy && !fw.allowed) {
+      failAt = gwId ?? null;
+      hops.push({
+        status: "fail",
+        title: `戻りの通信が Policy「${fw.policy.name}」でブロック`,
+        detail: `${from.label} → ${src.client.name} の応答が、接続状態「${(fw.policy.connState ?? "all") === "all" ? "すべて" : "確立済み"}」のブロックポリシーに一致しました。行きは届いても応答が返らないので通信は成立しません。ブロックの接続状態を「新規のみ」にすると戻りの通信は通ります。`,
+      });
+      return false;
+    }
+    hops.push({
+      status: "ok",
+      title: fw.policy ? `戻りの通信: Policy「${fw.policy.name}」で許可` : "戻りの通信: 確立済みの接続なので自動で許可 (ステートフル)",
+      detail: "ファイアウォールは行きの通信を覚えていて、その応答は既定で通します。",
+    });
+    return true;
+  };
+
   // 3. インターネット宛
   if (q.dst === "internet") {
     if (!reachGateway(src, "送信元")) return done(false, "ゲートウェイに到達できません。");
@@ -684,6 +793,7 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
       return done(false, "ファイアウォールで拒否されました。");
     }
     if (gwId) segs.push({ edge: "wan", from: gwId, to: "internet", label: "NAT → WAN", vlan: null, medium: "wan" });
+    if (!returnTraffic({ zone: "external", netId: null, clientId: null, ip: null, label: "インターネット" })) return done(false, "戻りの通信がブロックされました。");
     hops.push({ status: "ok", title: "NAT して WAN からインターネットへ", detail: "送信元 IP はゲートウェイの WAN アドレスに変換されます。" });
     return done(true, `${src.client.name} → インターネット (${proto}) は到達できます。`);
   }
@@ -779,6 +889,8 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     title: `${dst.client.name} (${dst.ip}) に到達`,
     detail: `経路: ${back.deviceIds.map((d) => findDevice(s, d)?.name).join(" → ")}`,
   });
+  if (!returnTraffic({ zone: dstNet.zoneId, netId: dstNet.id, clientId: dst.client.id, ip: dst.ip ?? null, label: dst.client.name }))
+    return done(false, "戻りの通信がブロックされました。");
   return done(true, `${src.client.name} → ${dst.client.name} (${proto}) は到達できます。`);
 }
 
