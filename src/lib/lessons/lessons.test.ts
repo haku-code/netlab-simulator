@@ -21,8 +21,9 @@ const port = (s: Scenario, dev: string, n: number) => s.devices.find((d) => d.id
 const client = (s: Scenario, id: string) => s.clients.find((c) => c.id === id)!;
 
 describe("lesson list", () => {
-  it("has 16 lessons with unique ids", () => {
-    expect(new Set(LESSONS.map((l) => l.id)).size).toBe(16);
+  it("has 18 lessons with unique ids", () => {
+    expect(LESSONS).toHaveLength(18);
+    expect(new Set(LESSONS.map((l) => l.id)).size).toBe(LESSONS.length);
   });
   for (const l of LESSONS) {
     it(`${l.id}: starts broken (with leases)`, () => {
@@ -37,6 +38,21 @@ describe("lesson list", () => {
 });
 
 describe("new lessons are solvable", () => {
+  it("iot-return: prevents new IoT connections while allowing reply traffic", () => {
+    expect(solve("iot-return", (s) => (s.policies.find((p) => p.id === "block-iot")!.connState = "new"))).toEqual({ before: 1, fails: [] });
+  });
+  it("kids-night: requires a targeted schedule spanning midnight, independent of the current clock", () => {
+    const addBlock = (s: Scenario, scheduled: boolean) => {
+      s.clock = { day: 4, time: "23:30" };
+      s.objects = [{ id: "kids", name: "子どもの端末", kind: "devices", values: ["kid-pc", "kid-phone"] }];
+      s.policies.push(policy("night", "夜間はインターネットを拒否", "block", "internal", "external", {
+        src: "group:kids",
+        schedule: scheduled ? { days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" } : undefined,
+      }));
+    };
+    expect(solve("kids-night", (s) => addBlock(s, false)).fails).toHaveLength(2);
+    expect(solve("kids-night", (s) => addBlock(s, true))).toEqual({ before: 3, fails: [] });
+  });
   it("dhcp-pool", () => {
     const r = solve("dhcp-pool", (s) => (s.networks[0].dhcp = { enabled: true, start: "192.168.1.6", end: "192.168.1.254" }));
     expect(r.fails).toEqual([]);

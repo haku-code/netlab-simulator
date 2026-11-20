@@ -19,15 +19,26 @@ import {
   Wifi,
 } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { usePathname, useRouter } from "next/navigation";
 import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useIssues } from "@/lib/hooks";
 import { LESSONS } from "@/lib/lessons";
 import { useStore } from "@/lib/store";
+import { useWindows } from "@/lib/windows";
 import { ClientIcon, DeviceGlyph } from "../icons";
-import { WindowLayer } from "../emulators/WindowLayer";
 import { LessonPanel } from "./LessonPanel";
 import { Terminal } from "./Terminal";
+
+const WindowLayer = dynamic(() => import("../emulators/WindowLayer").then((module) => module.WindowLayer), {
+  ssr: false,
+  loading: () => <div role="status" className="fixed top-14 right-4 z-50 rounded border border-line bg-surface px-3 py-2 text-[12px] shadow">端末を読み込み中…</div>,
+});
+
+function EmulatorWindows() {
+  const hasWindows = useWindows((s) => s.windows.length > 0);
+  return hasWindows ? <WindowLayer /> : null;
+}
 
 const SETTING_PAGES = [
   { href: "/settings/wifi", label: "Wi-Fi 設定", words: ["wifi", "wi-fi", "ssid", "パスワード", "password", "無線", "ワイファイ"] },
@@ -67,7 +78,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </main>
       </div>
       {mounted && <LessonPanel />}
-      {mounted && <WindowLayer />}
+      {mounted && <EmulatorWindows />}
     </div>
   );
 }

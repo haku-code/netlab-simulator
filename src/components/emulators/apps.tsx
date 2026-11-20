@@ -121,6 +121,12 @@ export function NetworkSettings({ clientId, dark }: { clientId: string; dark?: b
           <span className={label}>DNS</span>
           <span>{info.dns ?? "—"}</span>
         </div>
+        {info.leaseTime !== undefined && (
+          <div className={row}>
+            <span className={label}>DHCP リース期間</span>
+            <span>{info.leaseTime.toLocaleString("ja-JP")} 秒</span>
+          </div>
+        )}
         <div className={row}>
           <span className={label}>MAC アドレス</span>
           <span>{client.mac}</span>
@@ -306,7 +312,7 @@ export function Browser({ clientId, home = "", compact }: { clientId: string; ho
   const parsed = url ? parseUrl(url) : null;
   const recordTraffic = (address: string, event: WebEvent, newConnection: boolean) => {
     setTraffic(event);
-    usePcCapture.getState().record(clientId, () => browserPackets(s, clientId, address, event, newConnection));
+    usePcCapture.getState().record(clientId, () => browserPackets(s, clientId, address, event, newConnection), s);
   };
   const navigate = (address: string) => {
     setInput(address);
@@ -400,7 +406,7 @@ export function NetUtility({ clientId, dark }: { clientId: string; dark?: boolea
     if (!target) return;
     if (tool === "ping") {
       setOut(pingLines(s, clientId, target));
-      usePcCapture.getState().record(clientId, () => pingPackets(s, clientId, target));
+      usePcCapture.getState().record(clientId, () => pingPackets(s, clientId, target), s);
     } else {
       setOut(tracerouteLines(s, clientId, target));
     }

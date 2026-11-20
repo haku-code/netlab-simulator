@@ -122,7 +122,7 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
         </Field>
       ) : (
         <Field label="ケーブル" hint="ケーブルでつなぐ対向ポート">
-          <Select value={draft.cable} onChange={(v) => update((x) => (x.cable = v))} options={cableOptions} />
+          <Select aria-label="対向ポート" value={draft.cable} onChange={(v) => update((x) => (x.cable = v))} options={cableOptions} />
         </Field>
       )}
       {peerPort && (

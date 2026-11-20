@@ -558,16 +558,19 @@ export function evalFlow(s: Scenario, f: Flow): FirewallVerdict {
 }
 
 /** 互換用: ネットワーク間の新規通信を評価 */
-export function evalFirewall(s: Scenario, srcNetId: string, dst: Dest, protocol: Protocol, port: number | null, srcClientId?: string): FirewallVerdict {
+export function evalFirewall(
+  s: Scenario, srcNetId: string, dst: Dest, protocol: Protocol, port: number | null, srcClientId?: string,
+  endpoints?: { srcIp: string | null; dstIp: string | null },
+): FirewallVerdict {
   return evalFlow(s, {
     srcZone: zoneOfNetwork(s, srcNetId),
     srcNetId,
     srcClientId: srcClientId ?? null,
-    srcIp: srcClientId ? (s.clients.some((c) => c.id === srcClientId) ? (resolveClient(s, srcClientId).ip ?? null) : null) : null,
+    srcIp: endpoints ? endpoints.srcIp : srcClientId && s.clients.some((c) => c.id === srcClientId) ? resolveClient(s, srcClientId).ip ?? null : null,
     dstZone: dst.kind === "internet" ? "external" : zoneOfNetwork(s, dst.id),
     dstNetId: dst.kind === "internet" ? null : dst.id,
     dstClientId: dst.kind === "internet" ? null : (dst.clientId ?? null),
-    dstIp: dst.kind === "internet" ? null : dst.clientId && s.clients.some((c) => c.id === dst.clientId) ? (resolveClient(s, dst.clientId).ip ?? null) : null,
+    dstIp: endpoints ? endpoints.dstIp : dst.kind === "network" && dst.clientId && s.clients.some((c) => c.id === dst.clientId) ? resolveClient(s, dst.clientId).ip ?? null : null,
     protocol,
     port,
     state: "new",
@@ -624,7 +627,8 @@ function protoLabel(p: Protocol, port: number | null) {
   return p === "icmp" ? "ICMP (ping)" : `${p.toUpperCase()}${port !== null ? `/${port}` : ""}`;
 }
 
-export function trace(s: Scenario, q: TraceQuery): TraceResult {
+/** states は同一スナップショットの複数のトレースで共有できる。 */
+export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, ClientState>): TraceResult {
   const hops: Hop[] = [];
   const devs = new Set<string>();
   const links = new Set<string>();
@@ -684,7 +688,7 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     });
   };
 
-  const src = resolveClient(s, q.srcId);
+  const src = states?.get(q.srcId) ?? resolveClient(s, q.srcId);
   const proto = protoLabel(q.protocol, q.port);
   const gwId = findGateway(s)?.id;
 
@@ -739,8 +743,8 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     return true;
   };
 
-  const firewall = (dst: Dest, dstLabel: string): boolean => {
-    const fw = evalFirewall(s, srcNet.id, dst, q.protocol, q.port, q.srcId);
+  const firewall = (dst: Dest, dstLabel: string, dstIp: string | null = null): boolean => {
+    const fw = evalFirewall(s, srcNet.id, dst, q.protocol, q.port, q.srcId, { srcIp: src.ip ?? null, dstIp });
     const pair = `${zoneName(s, fw.srcZone)} → ${zoneName(s, fw.dstZone)}`;
     if (fw.policy) {
       hops.push({
@@ -817,7 +821,7 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     hops.push({ status: "info", title: "送信元と宛先が同じです" });
     return done(true, "自分自身です。");
   }
-  const dst = resolveClient(s, q.dst);
+  const dst = states?.get(q.dst) ?? resolveClient(s, q.dst);
   clientIds.push(dst.client.id);
   if (!dst.network || !dst.ip || dst.error) {
     failAt = `c:${dst.client.id}`;
@@ -885,7 +889,7 @@ export function trace(s: Scenario, q: TraceQuery): TraceResult {
     });
     return done(false, "ネットワークを分離 で遮断されました。");
   }
-  if (!firewall({ kind: "network", id: dstNet.id, clientId: dst.client.id }, dst.client.name)) {
+  if (!firewall({ kind: "network", id: dstNet.id, clientId: dst.client.id }, dst.client.name, dst.ip)) {
     failAt = gwId ?? null;
     return done(false, "ファイアウォールで拒否されました。");
   }

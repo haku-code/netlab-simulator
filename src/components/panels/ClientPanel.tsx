@@ -5,6 +5,7 @@ import { useClientStates } from "@/lib/hooks";
 import type { Client, ClientKind } from "@/lib/model";
 import Link from "next/link";
 import { netInfo } from "@/lib/emu";
+import { ipToStr, parseIp } from "@/lib/net/ip";
 import { roomAt } from "@/lib/floor";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
@@ -28,6 +29,9 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
 
   if (!client || !st || !draft) return null;
 
+  const reservation = draft.reservedIp?.trim();
+  const reservedAddress = reservation ? parseIp(reservation) : null;
+  const invalidReservation = draft.ipMode === "dhcp" && !!reservation && reservedAddress === null;
   const portOptions = s.devices
     .filter((d) => d.type !== "ap")
     .flatMap((d) => d.ports.filter((p) => !portBusy(s, d.id, p.id, { clientId: client.id })).map((p) => ({ value: `${d.id}|${p.id}`, label: `${d.name} · ${p.name}` })));
@@ -57,7 +61,7 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
       footer={
         tab === "settings" ? (
           <>
-            <Button variant="primary" disabled={!dirty} onClick={() =>
+            <Button variant="primary" disabled={!dirty || invalidReservation} onClick={() =>
                 mutate((sc) => {
                   // 接続先や IP 設定が変わったら、端末はつなぎ直して DHCP を取り直す
                   const index = sc.clients.findIndex((c) => c.id === client.id);
@@ -69,7 +73,7 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
                   rememberWifiPassword(sc, previous);
                   const wifiPassword = ssidBefore === ssidAfter ? previous.wifiPassword : ssidAfter ? savedWifiPassword(previous, ssidAfter) ?? "" : "";
                   const wifiIdentity = ssidBefore === ssidAfter ? previous.wifiIdentity : ssidAfter ? previous.wifiIdentities?.[ssidAfter] : undefined;
-                  sc.clients[index] = { ...draft, lease: relinked ? null : previous.lease, wifiPassword, wifiIdentity, wifiPasswords: previous.wifiPasswords, wifiIdentities: previous.wifiIdentities, webService: previous.webService };
+                  sc.clients[index] = { ...draft, reservedIp: reservedAddress === null ? undefined : ipToStr(reservedAddress), lease: relinked ? null : previous.lease, wifiPassword, wifiIdentity, wifiPasswords: previous.wifiPasswords, wifiIdentities: previous.wifiIdentities, webService: previous.webService };
                 })
               }>
               変更を適用
@@ -182,6 +186,13 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
           {draft.ipMode === "static" && (
             <Field label="IP アドレス" hint={st.network ? `${st.network.name}: ${st.network.cidr}` : undefined}>
               <Input className="tnum" value={draft.staticIp} placeholder="192.168.1.50" onChange={(e) => update((c) => (c.staticIp = e.target.value))} />
+            </Field>
+          )}
+          {draft.ipMode === "dhcp" && (
+            <Field label="DHCP 予約 IP アドレス" hint="指定した IP を次回のリース更新で割り当てます。空欄では DHCP の割り当て範囲から取得します。"
+              error={invalidReservation ? "有効な IPv4 アドレスを入力してください。" : undefined}>
+              <Input aria-label="DHCP 予約 IP アドレス" aria-invalid={invalidReservation} className="tnum"
+                value={draft.reservedIp ?? ""} placeholder="192.168.1.50" onChange={(e) => update((c) => (c.reservedIp = e.target.value))} />
             </Field>
           )}
           <div className="border-t border-line pt-4">

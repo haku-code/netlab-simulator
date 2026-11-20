@@ -54,6 +54,8 @@ export interface Link {
   b: PortRef;
 }
 
+export const DEFAULT_DHCP_LEASE_TIME = 86400;
+
 export interface Network {
   id: string;
   name: string;

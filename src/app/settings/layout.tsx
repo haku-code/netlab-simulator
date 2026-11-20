@@ -18,6 +18,7 @@ const GROUPS = [
     items: [
       { href: "/settings/zones", label: "ゾーン" },
       { href: "/settings/policies", label: "ポリシー一覧", area: "firewall" },
+      { href: "/settings/objects", label: "オブジェクト" },
     ],
   },
 ];

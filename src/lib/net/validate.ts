@@ -1,7 +1,7 @@
 import type { FirewallPolicy, Scenario } from "../model";
 import { wifiMode } from "../wifi-security";
 import { inSubnet, isHostAddr, overlaps, parseCidr, parseIp } from "./ip";
-import { CLIENT_REF, clientNetworkId, findNetwork, isClientRef, zoneName, zoneOfNetwork } from "./simulate";
+import { CLIENT_REF, clientNetworkId, findNetwork, findObject, isClientRef, isGroupRef, zoneName, zoneOfNetwork } from "./simulate";
 
 export interface Issue {
   severity: "error" | "warning";
@@ -27,10 +27,14 @@ function refCovers(s: Scenario, a: string, b: string) {
 
 export function ruleCovers(a: FirewallPolicy, b: FirewallPolicy, s?: Scenario): boolean {
   if (a.srcZone !== b.srcZone || a.dstZone !== b.dstZone) return false;
+  if (a.connState && a.connState !== "all" && a.connState !== b.connState) return false;
+  if (a.schedule && (!b.schedule || a.schedule.start !== b.schedule.start || a.schedule.end !== b.schedule.end
+    || !b.schedule.days.every((day) => a.schedule!.days.includes(day)))) return false;
   if (s ? !refCovers(s, a.src, b.src) : a.src !== "any" && a.src !== b.src) return false;
   if (s ? !refCovers(s, a.dst, b.dst) : a.dst !== "any" && a.dst !== b.dst) return false;
   if (a.protocol !== "all" && a.protocol !== b.protocol) return false;
-  if (a.port !== null && a.port !== b.port) return false;
+  if (a.portListId) return a.portListId === b.portListId;
+  if (a.port !== null && (b.portListId || a.port !== b.port)) return false;
   return true;
 }
 
@@ -154,12 +158,22 @@ export function validate(s: Scenario): Issue[] {
     }
     for (const [side, zone] of [[r.src, r.srcZone], [r.dst, r.dstZone]] as const) {
       if (side === "any") continue;
+      if (isGroupRef(side)) {
+        const object = findObject(s, side);
+        if (!object || object.kind === "ports") {
+          out.push({ severity: "warning", area: "firewall", targetId: r.id, message: `Policy「${r.name}」が利用できないグループを参照しています` });
+        }
+        continue;
+      }
       const netId = refNetwork(s, side);
       const label = isClientRef(side) ? (s.clients.find((c) => `${CLIENT_REF}${c.id}` === side)?.name ?? "端末") : findNetwork(s, side)?.name;
       if (!netId || !findNetwork(s, netId))
         out.push({ severity: "warning", area: "firewall", targetId: r.id, message: `Policy「${r.name}」が存在しない${isClientRef(side) ? "端末" : "ネットワーク"}を参照しています` });
       else if (zoneOfNetwork(s, netId) !== zone)
         out.push({ severity: "warning", area: "firewall", targetId: r.id, message: `Policy「${r.name}」: ${label} はゾーン ${zoneName(s, zone)} に属していないため一致しません` });
+    }
+    if (r.portListId && !s.objects?.some((o) => o.id === r.portListId && o.kind === "ports")) {
+      out.push({ severity: "warning", area: "firewall", targetId: r.id, message: `Policy「${r.name}」が利用できないポートリストを参照しています` });
     }
   });
 

@@ -3,11 +3,12 @@ import { trace, type TraceQuery, type TraceResult } from "../net/simulate";
 import { access, link, makeDevice, network, policy, setPort, ssid, trunk, wifi, wired, zones } from "../scenarios/builders";
 import { discover } from "../mdns";
 import { EXTRA } from "./extra";
+import { PHASE_ONE } from "./phase-one";
 import { baseTopology, q } from "./helpers";
 
 /** 到達性チェック（trace）か、mDNS で見つかるかのチェック */
 export type LessonCheck =
-  | { label: string; query: TraceQuery; expect: boolean }
+  | { label: string; query: TraceQuery; expect: boolean; clock?: NonNullable<Scenario["clock"]> }
   | { label: string; discover: { srcId: string; targetId: string; types: string[] }; expect: boolean };
 
 export interface Lesson {
@@ -64,7 +65,7 @@ export function runChecks(lesson: Lesson, s: Scenario): CheckOutcome[] {
     // 学習者がクライアントを削除した場合も落ちないように
     if (!exists(check.query.srcId) || !exists(check.query.dst))
       return { check, passed: false, result: emptyResult("対象のクライアントが見つかりません（削除された可能性があります）。") };
-    const result = trace(s, check.query);
+    const result = trace(check.clock ? { ...s, clock: check.clock } : s, check.query);
     return { check, result, passed: result.ok === check.expect };
   });
 }
@@ -280,7 +281,7 @@ const CORE: Lesson[] = [
   },
 ];
 
-const byId = new Map([...CORE, ...EXTRA].map((l) => [l.id, l]));
+const byId = new Map([...CORE, ...EXTRA, ...PHASE_ONE].map((l) => [l.id, l]));
 
 /** 難易度順の課題一覧 */
 export const LESSONS: Lesson[] = [
@@ -298,6 +299,8 @@ export const LESSONS: Lesson[] = [
   "trunk-fix",
   "cctv",
   "ha-only",
+  "iot-return",
+  "kids-night",
   "rule-order",
   "final",
 ].map((id) => byId.get(id)!);

@@ -42,6 +42,7 @@ export function Appliance({ clientId }: { clientId: string }) {
             {st.ip && <div className="tnum mt-1 text-muted">IP {st.ip}</div>}
           </div>
         )}
+        {info.leaseTime !== undefined && <p className="tnum mt-2 text-[12px] text-muted">DHCP リース期間 {info.leaseTime.toLocaleString("ja-JP")} 秒</p>}
         <div className="mt-3 flex gap-2">
           <button onClick={() => renew(clientId)} className="h-7 rounded border border-line bg-surface px-3 text-[12px] hover:bg-hover">
             ネットワークを再接続

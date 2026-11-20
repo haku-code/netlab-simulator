@@ -69,15 +69,17 @@ export function Select({
   onChange,
   className,
   disabled,
+  "aria-label": ariaLabel,
 }: {
   options: { value: string; label: string }[];
   value: string;
   onChange: (v: string) => void;
   className?: string;
   disabled?: boolean;
+  "aria-label"?: string;
 }) {
   return (
-    <select disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} className={clsx(inputCls, "pr-7", className)}>
+    <select aria-label={ariaLabel} disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} className={clsx(inputCls, "pr-7", className)}>
       {options.map((o) => (
         <option key={o.value} value={o.value}>
           {o.label}

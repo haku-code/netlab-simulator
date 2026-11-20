@@ -3,10 +3,10 @@
 import "@xyflow/react/dist/style.css";
 import { BaseEdge, Controls, EdgeLabelRenderer, Handle, Position, ReactFlow, getSmoothStepPath, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import clsx from "clsx";
-import { Globe } from "lucide-react";
-import { useMemo } from "react";
+import { Cable, Globe, Wifi } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 import { useClientStates } from "@/lib/hooks";
-import { attachedTo, type ClientKind, type DeviceType, type Scenario } from "@/lib/model";
+import { type ClientKind, type DeviceType, type Scenario } from "@/lib/model";
 import { findGateway, type Segment } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
@@ -23,8 +23,17 @@ export interface Highlight {
 }
 
 type HL = "on" | "off" | null;
-type DeviceData = { name: string; sub: string; type: DeviceType; hl: HL; selected: boolean; blocked?: boolean };
-type ClientData = { name: string; sub: string; kind: ClientKind; ok: boolean; hl: HL; selected: boolean; blocked?: boolean };
+
+export type ConnectionSelection =
+  | { kind: "client-connection"; id: string; targetDeviceId?: string }
+  | { kind: "port-connection"; id: string; portId: string };
+
+type DeviceData = { name: string; sub: string; type: DeviceType; hl: HL; selected: boolean; blocked?: boolean; acceptsCable?: boolean; dragOver?: boolean };
+type ClientData = {
+  name: string; sub: string; kind: ClientKind; wireless: boolean; ok: boolean; hl: HL; selected: boolean; blocked?: boolean;
+  edit?: (targetDeviceId?: string) => void;
+  setDragTarget?: (id: string | null) => void;
+};
 type Packet = { index: number; total: number; reversed: boolean; label: string; fail: boolean };
 type NetEdgeData = { packets?: Packet[] };
 
@@ -88,14 +97,17 @@ const edgeTypes = { net: NetEdge };
 
 const hiddenHandle = "!size-1 !min-h-0 !min-w-0 !border-0";
 
-function DeviceNode({ data }: NodeProps<Node<DeviceData>>) {
+function DeviceNode({ id, data }: NodeProps<Node<DeviceData>>) {
   return (
-    <div className={clsx("flex w-[140px] flex-col items-center text-center transition-opacity", data.hl === "off" && "opacity-30")}>
+    <div
+      className={clsx("flex w-[140px] flex-col items-center text-center transition-opacity", data.hl === "off" && "opacity-30")}
+      data-topology-wired-device={data.acceptsCable ? id : undefined}
+    >
       <Handle type="target" position={Position.Top} className={hiddenHandle} />
       <div
         className={clsx(
           "flex size-14 items-center justify-center rounded-lg border bg-surface transition-colors",
-          data.blocked ? "border-err ring-2 ring-err/30" : data.selected || data.hl === "on" ? "border-accent ring-2 ring-accent/25" : "border-line hover:border-faint",
+          data.blocked ? "border-err ring-2 ring-err/30" : data.dragOver || data.selected || data.hl === "on" ? "border-accent ring-2 ring-accent/25" : "border-line hover:border-faint",
         )}
       >
         <DeviceGlyph type={data.type} size={38} />
@@ -107,7 +119,14 @@ function DeviceNode({ data }: NodeProps<Node<DeviceData>>) {
   );
 }
 
+function wiredDeviceAt(x: number, y: number) {
+  return document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-topology-wired-device]")?.dataset.topologyWiredDevice ?? null;
+}
+
 function ClientNode({ data }: NodeProps<Node<ClientData>>) {
+  const ConnectionIcon = data.wireless ? Wifi : Cable;
+  const start = useRef<{ pointer: number; x: number; y: number } | null>(null);
+  const suppressClick = useRef(false);
   return (
     <div className={clsx("flex w-[96px] flex-col items-center text-center transition-opacity", data.hl === "off" && "opacity-30")}>
       <Handle type="target" position={Position.Top} className={hiddenHandle} />
@@ -115,10 +134,48 @@ function ClientNode({ data }: NodeProps<Node<ClientData>>) {
         className={clsx(
           "relative flex size-9 items-center justify-center rounded-full border bg-surface text-fg-2 transition-colors",
           data.blocked ? "border-err ring-2 ring-err/30" : data.selected || data.hl === "on" ? "border-accent ring-2 ring-accent/25" : "border-line hover:border-faint",
+          data.edit && "nodrag nopan cursor-grab touch-none select-none active:cursor-grabbing",
         )}
+        onPointerDown={data.edit ? (e) => {
+          if (e.button !== 0 || !e.isPrimary) return;
+          suppressClick.current = false;
+          start.current = { pointer: e.pointerId, x: e.clientX, y: e.clientY };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } : undefined}
+        onPointerMove={(e) => {
+          const from = start.current;
+          if (from?.pointer !== e.pointerId || Math.hypot(e.clientX - from.x, e.clientY - from.y) < 8) return;
+          data.setDragTarget?.(wiredDeviceAt(e.clientX, e.clientY));
+        }}
+        onPointerUp={(e) => {
+          const from = start.current;
+          if (from?.pointer !== e.pointerId) return;
+          start.current = null;
+          data.setDragTarget?.(null);
+          if (Math.hypot(e.clientX - from.x, e.clientY - from.y) < 8) return;
+          suppressClick.current = true;
+          const id = wiredDeviceAt(e.clientX, e.clientY);
+          if (id) data.edit?.(id);
+        }}
+        onLostPointerCapture={() => {
+          start.current = null;
+          data.setDragTarget?.(null);
+        }}
+        onClickCapture={(e) => {
+          if (suppressClick.current && e.detail > 0) e.stopPropagation();
+          suppressClick.current = false;
+        }}
       >
         <ClientIcon kind={data.kind} size={16} />
         {!data.ok && <span className="absolute -top-0.5 -right-0.5 size-2.5 rounded-full bg-err ring-2 ring-surface" />}
+        {data.edit && (
+          <button type="button" title="接続を変更" aria-label={`${data.name}の接続を変更`}
+            className="nodrag nopan absolute top-1/2 left-full ml-1 flex size-6 -translate-y-1/2 items-center justify-center rounded border border-line bg-surface text-muted hover:border-accent hover:text-accent focus-visible:outline focus-visible:outline-accent"
+            onPointerDown={(e) => { suppressClick.current = false; e.stopPropagation(); }}
+            onClick={(e) => { e.stopPropagation(); data.edit?.(); }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          ><ConnectionIcon size={13} aria-hidden="true" /></button>
+        )}
       </div>
       <div className="mt-1 max-w-full truncate text-[11.5px] font-medium">{data.name}</div>
       <div className="tnum text-[10.5px] text-muted">{data.sub}</div>
@@ -153,13 +210,11 @@ interface TreeNode {
 }
 
 /** ゲートウェイを根にした物理トポロジーの木を作り、x 座標を割り当てる */
-function layout(s: Scenario) {
+function layout(s: Scenario, parents: ReadonlyMap<string, string>) {
   const gw = findGateway(s);
   const pos = new Map<string, { x: number; y: number }>();
   const parentLink = new Map<string, string>();
-  if (!gw) return { pos, parentLink };
-
-  const visited = new Set([gw.id]);
+  const visited = new Set(gw ? [gw.id] : []);
   const build = (devId: string): TreeNode => {
     const node: TreeNode = { id: devId, kind: "device", children: [], width: DEV_W };
     for (const l of s.links) {
@@ -171,7 +226,7 @@ function layout(s: Scenario) {
       node.children.push(child);
     }
     for (const c of s.clients) {
-      const at = attachedTo(c);
+      const at = parents.get(c.id);
       if (at === devId) node.children.push({ id: c.id, kind: "client", children: [], width: CLI_W });
     }
     // 機器を先、クライアントを後に並べる
@@ -193,17 +248,19 @@ function layout(s: Scenario) {
     }
   };
 
-  const root = build(gw.id);
-  place(root, 0, 110);
-  pos.set("internet", { x: root.width / 2 - DEV_W / 2, y: 0 });
+  const root = gw ? build(gw.id) : null;
+  if (root) {
+    place(root, 0, 110);
+    pos.set("internet", { x: root.width / 2 - DEV_W / 2, y: 0 });
+  }
 
   // ゲートウェイにつながっていない機器・クライアント
-  let x = root.width + 80;
+  let x = root ? root.width + 80 : 0;
   for (const d of s.devices.filter((d) => !visited.has(d.id))) {
     pos.set(d.id, { x, y: 110 });
     let cx = x;
     for (const c of s.clients) {
-      const at = attachedTo(c);
+      const at = parents.get(c.id);
       if (at === d.id) {
         pos.set(`c:${c.id}`, { x: cx, y: 260 });
         cx += CLI_W + GAP;
@@ -212,8 +269,8 @@ function layout(s: Scenario) {
     x = Math.max(x + DEV_W + 60, cx + 60);
   }
   // ケーブルが抜けている端末は右下にまとめる
-  let ux = root.width + 80;
-  for (const c of s.clients.filter((c) => !attachedTo(c))) {
+  let ux = root ? root.width + 80 : 0;
+  for (const c of s.clients.filter((c) => !parents.has(c.id))) {
     pos.set(`c:${c.id}`, { x: ux, y: 410 });
     ux += CLI_W + GAP;
   }
@@ -224,12 +281,14 @@ export function TopologyView({
   highlight,
   selected,
   onSelect,
+  onEditConnection,
   className,
   interactive = true,
 }: {
   highlight?: Highlight | null;
   selected?: string | null;
   onSelect?: (sel: { kind: "device" | "client"; id: string } | null) => void;
+  onEditConnection?: (sel: ConnectionSelection) => void;
   className?: string;
   interactive?: boolean;
 }) {
@@ -237,9 +296,16 @@ export function TopologyView({
   const theme = useStore((x) => x.theme);
   const states = useClientStates();
   const openWindow = useWindows((w) => w.open);
+  const [dragTarget, setDragTarget] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(() => {
-    const { pos } = layout(s);
+    const parents = new Map<string, string>();
+    const deviceIds = new Set(s.devices.map((d) => d.id));
+    for (const c of s.clients) {
+      const at = c.connection.type === "wifi" ? states.get(c.id)?.attachDeviceId : c.connection.deviceId;
+      if (at && deviceIds.has(at)) parents.set(c.id, at);
+    }
+    const { pos } = layout(s, parents);
     const hlOf = (on: boolean): HL => (highlight ? (on ? "on" : "off") : null);
     const gw = findGateway(s);
 
@@ -250,7 +316,11 @@ export function TopologyView({
         id: d.id,
         type: "device",
         position: pos.get(d.id) ?? { x: 0, y: 0 },
-        data: { name: d.name, sub: d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id } satisfies DeviceData,
+        data: {
+          name: d.name, sub: d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id,
+          acceptsCable: !!onEditConnection && d.type !== "ap" && d.ports.length > 0,
+          dragOver: dragTarget === d.id,
+        } satisfies DeviceData,
       });
     }
     for (const c of s.clients) {
@@ -259,7 +329,12 @@ export function TopologyView({
         id: `c:${c.id}`,
         type: "client",
         position: pos.get(`c:${c.id}`) ?? { x: 0, y: 0 },
-        data: { name: c.name, sub: st?.ip ?? "—", kind: c.kind, ok: !st?.error, hl: hlOf(!!highlight?.clientIds.includes(c.id)), selected: selected === c.id, blocked: highlight?.failAt === `c:${c.id}` } satisfies ClientData,
+        data: {
+          name: c.name, sub: st?.ip ?? "—", kind: c.kind, wireless: c.connection.type === "wifi", ok: !st?.error,
+          hl: hlOf(!!highlight?.clientIds.includes(c.id)), selected: selected === c.id, blocked: highlight?.failAt === `c:${c.id}`,
+          edit: onEditConnection ? (targetDeviceId) => onEditConnection({ kind: "client-connection", id: c.id, targetDeviceId }) : undefined,
+          setDragTarget: onEditConnection ? setDragTarget : undefined,
+        } satisfies ClientData,
       });
     }
 
@@ -271,7 +346,7 @@ export function TopologyView({
     const edges: Edge[] = [];
     if (gw) {
       const on = !!highlight?.deviceIds.includes(gw.id) && highlight.ok && highlight.clientIds.length === 1;
-      edges.push({ id: "wan", source: "internet", target: gw.id, type: "smoothstep", style: stroke(on) });
+      edges.push({ id: "wan", source: "internet", target: gw.id, type: "smoothstep", selectable: false, focusable: false, style: stroke(on) });
     }
     const y = (id: string) => pos.get(id)?.y ?? 0;
     for (const l of s.links) {
@@ -281,7 +356,7 @@ export function TopologyView({
       edges.push({ id: l.id, source: up.deviceId, target: down.deviceId, type: "smoothstep", animated: !!on, style: stroke(on, fail) });
     }
     for (const c of s.clients) {
-      const at = attachedTo(c);
+      const at = parents.get(c.id);
       if (!at) continue;
       const on = highlight?.clientIds.includes(c.id);
       edges.push({
@@ -304,7 +379,7 @@ export function TopologyView({
     });
     for (const e of edges) e.type = "net";
     return { nodes, edges };
-  }, [s, states, highlight, selected]);
+  }, [s, states, highlight, selected, onEditConnection, dragTarget]);
 
   return (
     <div className={clsx("h-full w-full", className)}>
@@ -328,6 +403,17 @@ export function TopologyView({
           onSelect?.(n.id.startsWith("c:") ? { kind: "client", id: n.id.slice(2) } : { kind: "device", id: n.id });
         }}
         onPaneClick={() => onSelect?.(null)}
+        onEdgeClick={onEditConnection ? (_, edge) => {
+          if (edge.id === "wan") return;
+          if (edge.id.startsWith("ce:")) {
+            onEditConnection({ kind: "client-connection", id: edge.id.slice(3) });
+            return;
+          }
+          const link = s.links.find((l) => l.id === edge.id);
+          if (!link) return;
+          const port = link.a.deviceId === edge.target ? link.a : link.b;
+          onEditConnection({ kind: "port-connection", id: port.deviceId, portId: port.portId });
+        } : undefined}
         onNodeDoubleClick={(_, n) => n.id.startsWith("c:") && openWindow(n.id.slice(2))}
       >
         {interactive && <Controls showInteractive={false} position="bottom-right" />}

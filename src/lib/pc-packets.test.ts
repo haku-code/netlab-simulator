@@ -49,4 +49,35 @@ describe("PC packet analyzer", () => {
     expect(session.running).toBe(false);
     expect(session.frames.map((f) => f.no)).toEqual([1]);
   });
+
+  it("observes an iPhone on the selected SSID without leaking protected headers or payloads", () => {
+    const s = assignLeases(defaultScenario());
+    const { start, stop, record } = usePcCapture.getState();
+    const generate = () => browserPackets(s, "iphone", "http://web.test", page);
+    start("home-monitor", "home");
+    start("guest-monitor", "guest");
+    record("iphone", generate, s);
+    const first = usePcCapture.getState().sessions["home-monitor"].frames;
+    expect(first).toHaveLength(7);
+    expect(first[0]).toMatchObject({ protocol: "802.11", radio: { ssid: "Home", station: "iPhone", visibility: "protected" } });
+    expect(first[0].source).toBe(s.clients.find((c) => c.id === "iphone")!.mac);
+    expect(first.every((f) => !f.sample && !f.sourcePort && !f.destinationPort)).toBe(true);
+    expect(usePcCapture.getState().sessions["guest-monitor"].frames).toEqual([]);
+    stop("home-monitor");
+    stop("guest-monitor");
+  });
+
+  it("displays illustrative WEP HTTP frames and keeps the HTTPS payload encrypted", () => {
+    const s = assignLeases(defaultScenario());
+    s.ssids.find((w) => w.id === "home")!.security = "wep";
+    const { start, stop, record } = usePcCapture.getState();
+    start("legacy-monitor", "home");
+    record("iphone", () => browserPackets(s, "iphone", "http://web.test", page), s);
+    record("iphone", () => browserPackets(s, "iphone", "https://web.test", page), s);
+    const frames = usePcCapture.getState().sessions["legacy-monitor"].frames;
+    expect(frames.find((f) => f.protocol === "HTTP")).toMatchObject({ sample: "GET /", radio: { visibility: "legacy" } });
+    expect(frames.filter((f) => f.summary.startsWith("Application Data"))).toHaveLength(2);
+    expect(frames.filter((f) => f.protocol === "TLS").every((f) => !f.sample)).toBe(true);
+    stop("legacy-monitor");
+  });
 });

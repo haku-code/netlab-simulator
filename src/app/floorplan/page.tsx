@@ -56,11 +56,12 @@ export default function FloorPlanPage() {
   const devices = s.devices.map((d) => (drag?.kind === "device" && drag.id === d.id ? { ...d, pos: drag.pos } : d));
   const clients = s.clients.map((c) => (drag?.kind === "client" && drag.id === c.id ? { ...c, pos: drag.pos } : c));
   const aps = devices.filter((d) => d.type === "ap" && d.pos);
-  const heatAps = ssidFilter === "all" ? aps : aps.filter((ap) => broadcasts(s.ssids.find((w) => w.id === ssidFilter)!, ap.id));
+  const filteredSsid = s.ssids.find((w) => w.id === ssidFilter);
+  const heatAps = filteredSsid ? aps.filter((ap) => broadcasts(filteredSsid, ap.id)) : aps;
 
-  const cells = useMemo(() => {
+  const heatPaths = useMemo(() => {
     if (!f || band === "off") return [];
-    const out: { x: number; y: number; w: number; h: number; c: string }[] = [];
+    const byColor = new Map<string, string[]>();
     // 広い間取りではセルを大きくし、ドラッグ中の再計算を軽くする。
     const step = Math.max(0.5, Math.ceil(Math.sqrt((f.width * f.height) / 1800) * 2) / 2);
     for (let x = 0; x < f.width; x += step)
@@ -70,9 +71,13 @@ export default function FloorPlanPage() {
         const p = { x: x + w / 2, y: y + h / 2 };
         const best = Math.max(-120, ...heatAps.map((ap) => rssiAt(f, ap, p, band)));
         const c = heat(best);
-        if (c) out.push({ x, y, w, h, c });
+        if (!c) continue;
+        let path = byColor.get(c);
+        if (!path) byColor.set(c, path = []);
+        path.push(`M${x} ${y}h${w}v${h}h-${w}Z`);
       }
-    return out;
+    // セルを色ごとのパスにまとめ、ドラッグ時の DOM 更新を減らす。
+    return Array.from(byColor, ([color, commands]) => ({ color, d: commands.join("") }));
   }, [f, band, heatAps.map((a) => `${a.id}:${a.pos!.x.toFixed(1)},${a.pos!.y.toFixed(1)}:${a.txPower}`).join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!f) {
@@ -163,7 +168,7 @@ export default function FloorPlanPage() {
             { value: "off", label: "Off" },
           ]}
         />
-        <Select className="w-52" value={ssidFilter} onChange={setSsidFilter} options={[{ value: "all", label: "すべての AP" }, ...s.ssids.map((w) => ({ value: w.id, label: `SSID: ${w.name} の範囲` }))]} />
+        <Select className="w-52" value={filteredSsid?.id ?? "all"} onChange={setSsidFilter} options={[{ value: "all", label: "すべての AP" }, ...s.ssids.map((w) => ({ value: w.id, label: `SSID: ${w.name} の範囲` }))]} />
         <span className="flex items-center gap-2 text-[11.5px] text-muted">
           {[
             ["rgba(56,178,97,0.7)", "≥ −55"],
@@ -199,8 +204,8 @@ export default function FloorPlanPage() {
                 </text>
               </g>
             ))}
-            {cells.map((c, i) => (
-              <rect key={i} x={c.x} y={c.y} width={c.w} height={c.h} fill={c.c} />
+            {heatPaths.map(({ color, d }) => (
+              <path key={color} d={d} fill={color} pointerEvents="none" />
             ))}
             {/* 選択中の端末 → 接続中の AP */}
             {selClient?.pos && selAp?.pos && (

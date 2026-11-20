@@ -6,7 +6,7 @@ import { BackLink, Button, Checkbox, FormRow, FormSection, Input, Notice, PageHe
 import { useIssues, useQueryId } from "@/lib/hooks";
 import { ipToStr, maskStr, parseCidr, parseIp } from "@/lib/net/ip";
 import { clientNetworkId, zoneName } from "@/lib/net/simulate";
-import { uid, type Network, type Scenario } from "@/lib/model";
+import { DEFAULT_DHCP_LEASE_TIME, uid, type Network, type Scenario } from "@/lib/model";
 import { useStore } from "@/lib/store";
 
 export default function NetworksPage() {
@@ -129,10 +129,19 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
     });
   const sn = parseCidr(draft.cidr);
   const gwOk = parseIp(draft.gatewayIp) !== null && !!sn;
+  const leaseTime = draft.dhcp.leaseTime;
+  const invalidLease = leaseTime !== undefined && (!Number.isSafeInteger(leaseTime) || leaseTime < 1);
+  const dns = (draft.dhcp.dns ?? []).flatMap((entry) => entry.trim().split(/\s+/)).filter(Boolean);
+  const invalidDns = dns.some((entry) => parseIp(entry) === null);
 
   const save = () => {
     mutate((sc) => {
-      const n = { ...draft, name: draft.name.trim() || `VLAN${draft.vlanId}` };
+      const dnsServers = dns.map(parseIp).filter((ip) => ip !== null).map(ipToStr);
+      const n = {
+        ...draft,
+        name: draft.name.trim() || `VLAN${draft.vlanId}`,
+        dhcp: { ...draft.dhcp, dns: dnsServers.length ? [...new Set(dnsServers)] : undefined },
+      };
       const i = sc.networks.findIndex((x) => x.id === n.id);
       if (i >= 0) sc.networks[i] = n;
       else sc.networks.push(n);
@@ -194,13 +203,27 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
           />
         </FormRow>
         {draft.dhcp.enabled && (
-          <FormRow label="DHCP の割り当て範囲">
-            <div className="flex items-center gap-2">
-              <Input className="tnum" value={draft.dhcp.start} onChange={(e) => update((n) => (n.dhcp.start = e.target.value))} />
-              <span className="text-muted">–</span>
-              <Input className="tnum" value={draft.dhcp.end} onChange={(e) => update((n) => (n.dhcp.end = e.target.value))} />
-            </div>
-          </FormRow>
+          <>
+            <FormRow label="DHCP の割り当て範囲">
+              <div className="flex items-center gap-2">
+                <Input className="tnum" value={draft.dhcp.start} onChange={(e) => update((n) => (n.dhcp.start = e.target.value))} />
+                <span className="text-muted">–</span>
+                <Input className="tnum" value={draft.dhcp.end} onChange={(e) => update((n) => (n.dhcp.end = e.target.value))} />
+              </div>
+            </FormRow>
+            <FormRow label="DHCP リース期間（秒）" hint="空欄では 86400 秒（24 時間）です。"
+              error={invalidLease ? "1 秒以上の整数を入力してください。" : undefined}>
+              <Input aria-label="DHCP リース期間（秒）" aria-invalid={invalidLease} type="number" min={1} step={1}
+                className="tnum" placeholder={String(DEFAULT_DHCP_LEASE_TIME)} value={leaseTime ?? ""}
+                onChange={(e) => update((n) => (n.dhcp.leaseTime = e.target.value === "" ? undefined : e.target.valueAsNumber))} />
+            </FormRow>
+            <FormRow label="DNS サーバー" hint="IPv4 をカンマ区切りで入力します。先頭のサーバーを使い、空欄ではゲートウェイを使います。"
+              error={invalidDns ? "DNS サーバーの IPv4 アドレスを確認してください。" : undefined}>
+              <Input aria-label="DNS サーバー" aria-invalid={invalidDns} className="tnum" placeholder={draft.gatewayIp}
+                value={draft.dhcp.dns?.join(",") ?? ""}
+                onChange={(e) => update((n) => (n.dhcp.dns = e.target.value.split(/[,、]/)))} />
+            </FormRow>
+          </>
         )}
       </FormSection>
       <FormSection title="詳細設定">
@@ -216,7 +239,7 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
         </FormRow>
       </FormSection>
       <div className="sticky bottom-0 -mx-1 flex gap-2 border-t border-line bg-bg px-1 py-3">
-        <Button variant="primary" disabled={!isNew && !dirty} onClick={save}>
+        <Button variant="primary" disabled={(!isNew && !dirty) || (draft.dhcp.enabled && (invalidLease || invalidDns))} onClick={save}>
           {isNew ? "ネットワークを追加" : "変更を適用"}
         </Button>
         {!isNew && (

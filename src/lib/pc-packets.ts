@@ -4,8 +4,9 @@ import { dnsServerOf, parseUrl, probe, type ProbeResult } from "./emu";
 import { parseIp } from "./net/ip";
 import { resolveClient } from "./net/simulate";
 import { virtualWebCapture, webError, type WebEvent } from "./web";
+import { clientWifiMode } from "./wifi-security";
 
-export const PACKET_PROTOCOLS = ["DNS", "TCP", "TLS", "HTTP", "ICMP"] as const;
+export const PACKET_PROTOCOLS = ["802.11", "DNS", "TCP", "TLS", "HTTP", "ICMP"] as const;
 export type PacketProtocol = (typeof PACKET_PROTOCOLS)[number];
 
 export type PcPacket = {
@@ -16,7 +17,41 @@ export type PcPacket = {
   destinationPort?: number;
   summary: string;
   sample?: string;
+  radio?: {
+    ssid: string;
+    station: string;
+    security: string;
+    transmitter: string;
+    receiver: string;
+    visibility: "open" | "legacy" | "protected";
+  };
 };
+
+export function wifiPacketContext(s: Scenario, id: string) {
+  const client = s.clients.find((c) => c.id === id);
+  if (client?.connection.type !== "wifi" || !client.connection.ssidId) return null;
+  const ssidId = client.connection.ssidId;
+  const ssid = s.ssids.find((w) => w.id === ssidId);
+  const mode = clientWifiMode(s, client);
+  if (!ssid || !mode) return null;
+  const { ip, attachDeviceId } = resolveClient(s, id);
+  const ap = s.devices.find((d) => d.id === attachDeviceId);
+  return ap && ip ? { ssid, mode, station: client, ap, ip } : null;
+}
+
+export function observeWifiPackets(packets: PcPacket[], context: NonNullable<ReturnType<typeof wifiPacketContext>>): PcPacket[] {
+  const { ssid, mode, station, ap, ip } = context;
+  return packets.map((packet) => {
+    const outgoing = packet.source === ip;
+    const transmitter = outgoing ? station.mac : ap.mac;
+    const receiver = outgoing ? ap.mac : station.mac;
+    const radio = { ssid: ssid.name, station: station.name, security: mode.label, visibility: mode.radio, transmitter, receiver };
+    if (mode.radio === "protected") {
+      return { protocol: "802.11", source: transmitter, destination: receiver, summary: `${station.name} · 暗号化データ`, radio };
+    }
+    return { ...packet, radio };
+  });
+}
 
 function targetIp(result: ProbeResult) {
   if (!("target" in result)) return undefined;

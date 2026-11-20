@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { TopologyView } from "@/components/topology/TopologyView";
 import { TraceView } from "@/components/TraceView";
 import { Button, Card, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
@@ -13,9 +13,12 @@ import { useScenario } from "@/lib/store";
 import { probe } from "@/lib/emu";
 import { webError } from "@/lib/web";
 import { WebCapture } from "@/components/emulators/WebLab";
+import { useClientStates } from "@/lib/hooks";
+import { ClockControl } from "@/components/ClockControl";
 
 export default function DiagnosticsPage() {
   const s = useScenario();
+  const states = useClientStates();
   const [selectedSrc, setSrc] = useState("");
   const [selectedDst, setDst] = useState("internet");
   const [protocol, setProtocol] = useState<Protocol>("icmp");
@@ -28,33 +31,38 @@ export default function DiagnosticsPage() {
   const dst = s.clients.some((c) => c.id === selectedDst && c.id !== src) ? selectedDst : "internet";
   const nodeName = (id: string) =>
     id === "internet" ? "インターネット" : id.startsWith("c:") ? (s.clients.find((c) => c.id === id.slice(2))?.name ?? "?") : (s.devices.find((d) => d.id === id)?.name ?? "?");
-  const run = (srcId = src, destination = dst) => setRan({ srcId, dst: destination });
+  const run = () => setRan({ srcId: src, dst });
   const changeSource = (id: string) => {
     if (id === dst) setDst("internet");
     setSrc(id);
   };
+  const pickPair = useCallback((srcId: string, destination: string) => {
+    setSrc(srcId);
+    setDst(destination);
+    setRan({ srcId, dst: destination });
+  }, []);
 
   // 設定が変わったら結果を再計算する
   const result = useMemo(() => {
     if (!ran) return null;
     if (!s.clients.some((c) => c.id === ran.srcId) || (ran.dst !== "internet" && !s.clients.some((c) => c.id === ran.dst))) return null;
-    return trace(s, { ...ran, protocol, port: portNum });
-  }, [s, ran, protocol, portNum]);
+    return trace(s, { ...ran, protocol, port: portNum }, states);
+  }, [s, ran, protocol, portNum, states]);
   const webService = protocol === "tcp" && (portNum === 80 || portNum === 443)
     ? s.clients.find((c) => c.id === ran?.dst && c.kind === "server")?.webService
     : undefined;
 
   return (
     <>
-      <PageHeader title="パケットトレース" />
+      <PageHeader title="パケットトレース"><ClockControl /></PageHeader>
       <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
         <div className="space-y-4">
           <Card className="space-y-3 p-4">
             <Field label="送信元">
-              <Select value={src} onChange={changeSource} options={clientOpts} disabled={!src} />
+              <Select aria-label="トレースの送信元" value={src} onChange={changeSource} options={clientOpts} disabled={!src} />
             </Field>
             <Field label="宛先">
-              <Select value={dst} onChange={setDst} options={[{ value: "internet", label: "インターネット" }, ...clientOpts.filter((o) => o.value !== src)]} />
+              <Select aria-label="トレースの宛先" value={dst} onChange={setDst} options={[{ value: "internet", label: "インターネット" }, ...clientOpts.filter((o) => o.value !== src)]} />
             </Field>
             <Field label="プロトコル">
               <Segmented<Protocol>
@@ -69,10 +77,10 @@ export default function DiagnosticsPage() {
             </Field>
             {protocol !== "icmp" && (
               <Field label="宛先ポート">
-                <Input type="number" className="tnum" value={port} onChange={(e) => setPort(e.target.value)} />
+                <Input aria-label="トレースの宛先ポート" type="number" className="tnum" value={port} onChange={(e) => setPort(e.target.value)} />
               </Field>
             )}
-            <Button variant="primary" className="w-full" onClick={() => run()} disabled={!src}>
+            <Button variant="primary" className="w-full" onClick={run} disabled={!src}>
               トレースを実行
             </Button>
           </Card>
@@ -127,19 +135,20 @@ export default function DiagnosticsPage() {
               </div>
             </Card>
           )}
-          <Matrix protocol={protocol} port={portNum} onPick={(a, b) => (setSrc(a), setDst(b), run(a, b))} />
+          <Matrix protocol={protocol} port={portNum} onPick={pickPair} />
         </div>
       </div>
     </>
   );
 }
 
-function Matrix({ onPick, protocol, port }: { onPick: (a: string, b: string) => void; protocol: Protocol; port: number | null }) {
+const Matrix = memo(function Matrix({ onPick, protocol, port }: { onPick: (a: string, b: string) => void; protocol: Protocol; port: number | null }) {
   const s = useScenario();
+  const states = useClientStates();
   const cols = useMemo(() => [...s.clients.map((c) => ({ id: c.id, name: c.name })), { id: "internet", name: "インターネット" }], [s.clients]);
   const grid = useMemo(
-    () => s.clients.map((a) => cols.map((b) => (a.id === b.id ? null : trace(s, { srcId: a.id, dst: b.id, protocol, port }).ok))),
-    [s, cols, protocol, port],
+    () => s.clients.map((a) => cols.map((b) => (a.id === b.id ? null : trace(s, { srcId: a.id, dst: b.id, protocol, port }, states).ok))),
+    [s, cols, protocol, port, states],
   );
   return (
     <Card title="到達性マトリクス" action={<span className="text-[12px] text-muted">行: 送信元 / 列: 宛先 · {protocol.toUpperCase()}{port ? `/${port}` : ""}</span>}>
@@ -190,4 +199,4 @@ function Matrix({ onPick, protocol, port }: { onPick: (a: string, b: string) => 
       </div>
     </Card>
   );
-}
+});

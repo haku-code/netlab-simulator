@@ -13,15 +13,19 @@ export function ClockControl() {
   const set = (c: typeof clock) => mutate((sc) => (sc.clock = c));
   return (
     <span className="inline-flex h-8 items-center gap-1.5 rounded border border-line bg-surface px-2 text-[12.5px]" title="シミュレーション上の現在時刻。スケジュール付きのポリシーはこの時刻で判定します。">
-      <Clock size={13} className="text-muted" />
-      <select value={clock.day} onChange={(e) => set({ ...clock, day: Number(e.target.value) })} className="bg-transparent outline-none">
+      <Clock aria-hidden="true" size={13} className="text-muted" />
+      <span>シミュレーション時刻</span>
+      <select aria-label="シミュレーションの曜日" value={clock.day} onChange={(e) => set({ ...clock, day: Number(e.target.value) })} className="bg-transparent focus-visible:outline focus-visible:outline-accent">
         {DAYS.map((d, i) => (
           <option key={d} value={i}>
             {d}曜
           </option>
         ))}
       </select>
-      <input type="time" value={clock.time} onChange={(e) => e.target.value && set({ ...clock, time: e.target.value })} className="tnum bg-transparent outline-none" />
+      <input aria-label="シミュレーションの時刻" type="time" value={clock.time} onInput={(e) => {
+        const time = e.currentTarget.value;
+        if (time) set({ ...clock, time });
+      }} className="tnum bg-transparent focus-visible:outline focus-visible:outline-accent" />
     </span>
   );
 }

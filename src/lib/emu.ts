@@ -1,5 +1,5 @@
 // 端末エミュレーター用のネットワーク操作（ブラウザ・ping・traceroute）
-import type { Client, ClientKind, Port, Protocol, Scenario } from "./model";
+import { DEFAULT_DHCP_LEASE_TIME, type Client, type ClientKind, type Port, type Protocol, type Scenario } from "./model";
 import { inSubnet, parseCidr, parseIp } from "./net/ip";
 import { findNetwork, findPort, radioLink, resolveClient, trace, type ClientState, type Hop } from "./net/simulate";
 
@@ -217,7 +217,7 @@ export function netInfo(s: Scenario, clientId: string): NetInfo {
     mask: st.ip ? mask : undefined,
     router: st.ip ? leaseNet?.gatewayIp : undefined,
     dns: st.ip ? (leaseNet?.dhcp.dns?.find((d) => d.trim()) ?? leaseNet?.gatewayIp) : undefined,
-    leaseTime: c.ipMode === "dhcp" && st.ip ? (leaseNet?.dhcp.leaseTime ?? 86400) : undefined,
+    leaseTime: c.ipMode === "dhcp" && st.ip ? (leaseNet?.dhcp.leaseTime ?? DEFAULT_DHCP_LEASE_TIME) : undefined,
     ssidName: ssid?.name,
     radio: radio ? `${apName} · ${radio.band} GHz · ch ${radio.channel} · ${radio.rssi} dBm · ${radio.rate} Mbps` : undefined,
     wifi: radio,

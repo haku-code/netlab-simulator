@@ -75,6 +75,16 @@ describe("simulate (default scenario)", () => {
     expect(t(s2, "plug", "pc", "tcp", 80).ok).toBe(true);
     expect(t(s2, "plug", "pc", "tcp", 22).ok).toBe(false);
   });
+  it("reuses precomputed endpoint states without changing trace results", () => {
+    const s2 = defaultScenario();
+    const states = new Map(s2.clients.map((c) => [c.id, resolveClient(s2, c.id)]));
+    for (const src of s2.clients) {
+      for (const dst of [...s2.clients.map((c) => c.id), "internet"]) {
+        const query = { srcId: src.id, dst, protocol: "tcp", port: 443 } as const;
+        expect(trace(s2, query, states)).toEqual(trace(s2, query));
+      }
+    }
+  });
   it("default scenario has no errors", () => {
     expect(validate(s).filter((i) => i.severity === "error")).toEqual([]);
   });

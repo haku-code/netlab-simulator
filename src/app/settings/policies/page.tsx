@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Button, Field, Input, Notice, PageHeader, Segmented, Select, SidePanel, Term, Toggle, table as t, useDraft } from "@/components/ui";
 import { useIssues } from "@/lib/hooks";
 import { uid, type FirewallPolicy, type Scenario } from "@/lib/model";
-import { CLIENT_REF, clientNetworkId, clientRef, findNetwork, findObject, isClientRef, isGroupRef, zoneDefault, zoneName } from "@/lib/net/simulate";
+import { CLIENT_REF, GROUP_REF, clientNetworkId, clientRef, findNetwork, findObject, isClientRef, isGroupRef, zoneDefault, zoneName } from "@/lib/net/simulate";
 import { ClockControl, DAYS, scheduleLabel } from "@/components/ClockControl";
 import { useStore } from "@/lib/store";
 
@@ -184,9 +184,10 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
       { value: "any", label: "指定なし" },
       ...nets.map((n) => ({ value: n.id, label: `ネットワーク: ${n.name}` })),
       ...devices.map((c) => ({ value: clientRef(c.id), label: `端末: ${c.name}` })),
-      ...(s.objects ?? []).filter((o) => o.kind !== "ports").map((o) => ({ value: `group:${o.id}`, label: `グループ: ${o.name}` })),
+      ...(s.objects ?? []).filter((o) => o.kind !== "ports").map((o) => ({ value: `${GROUP_REF}${o.id}`, label: `グループ: ${o.name}` })),
     ];
   };
+  const invalidSchedule = !!draft.schedule && (!draft.schedule.days.length || !draft.schedule.start || !draft.schedule.end);
 
   const apply = () => {
     mutate((sc) => {
@@ -205,7 +206,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
       title={isNew ? "ポリシーを作成" : draft.name}
       footer={
         <>
-          <Button variant="primary" disabled={!isNew && !dirty} onClick={apply}>
+          <Button variant="primary" disabled={(!isNew && !dirty) || invalidSchedule} onClick={apply}>
             {isNew ? "ポリシーを追加" : "変更を適用"}
           </Button>
           {!isNew && (
@@ -231,7 +232,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
         </div>
       ))}
       <Field label="名前">
-        <Input value={draft.name} placeholder="例: IoT から LAN への通信を拒否" onChange={(e) => update((p) => (p.name = e.target.value))} />
+        <Input aria-label="ポリシー名" value={draft.name} placeholder="例: IoT から LAN への通信を拒否" onChange={(e) => update((p) => (p.name = e.target.value))} />
       </Field>
       <Field label="動作" term="policy">
         <Segmented<FirewallPolicy["action"]>
@@ -247,10 +248,10 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
         <div className="mb-2 text-[12px] font-medium">送信元</div>
         <div className="grid grid-cols-2 gap-2">
           <Field label="ゾーン">
-            <Select value={draft.srcZone} onChange={(v) => update((p) => ((p.srcZone = v), (p.src = "any")))} options={zoneOpts(["external"])} />
+            <Select aria-label="送信元ゾーン" value={draft.srcZone} onChange={(v) => update((p) => ((p.srcZone = v), (p.src = "any")))} options={zoneOpts(["external"])} />
           </Field>
-          <Field label="ネットワーク / 端末">
-            <Select value={draft.src} onChange={(v) => update((p) => (p.src = v))} options={netOpts(draft.srcZone)} />
+          <Field label="ネットワーク / 端末 / グループ">
+            <Select aria-label="送信元の対象" value={draft.src} onChange={(v) => update((p) => (p.src = v))} options={netOpts(draft.srcZone)} />
           </Field>
         </div>
       </div>
@@ -258,20 +259,24 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
         <div className="mb-2 text-[12px] font-medium">宛先</div>
         <div className="grid grid-cols-2 gap-2">
           <Field label="ゾーン">
-            <Select value={draft.dstZone} onChange={(v) => update((p) => ((p.dstZone = v), (p.dst = "any")))} options={zoneOpts([])} />
+            <Select aria-label="宛先ゾーン" value={draft.dstZone} onChange={(v) => update((p) => ((p.dstZone = v), (p.dst = "any")))} options={zoneOpts([])} />
           </Field>
-          <Field label="ネットワーク / 端末">
-            <Select value={draft.dst} disabled={draft.dstZone === "external" || draft.dstZone === "gateway"} onChange={(v) => update((p) => (p.dst = v))} options={netOpts(draft.dstZone)} />
+          <Field label="ネットワーク / 端末 / グループ">
+            <Select aria-label="宛先の対象" value={draft.dst} disabled={draft.dstZone === "external" || draft.dstZone === "gateway"} onChange={(v) => update((p) => (p.dst = v))} options={netOpts(draft.dstZone)} />
           </Field>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Field label="プロトコル">
-          <Select value={draft.protocol} onChange={(v) => update((p) => ((p.protocol = v as FirewallPolicy["protocol"]), v === "icmp" && (p.port = null)))} options={PROTO} />
+          <Select aria-label="ポリシーのプロトコル" value={draft.protocol} onChange={(v) => update((p) => {
+            p.protocol = v as FirewallPolicy["protocol"];
+            if (v === "icmp") { p.port = null; p.portListId = undefined; }
+          })} options={PROTO} />
         </Field>
         <Field label="ポート" hint="空欄のままならすべてのポートが対象">
           <div className="flex gap-1.5">
             <Select
+              aria-label="ポートの指定方法"
               className="w-28 shrink-0"
               disabled={draft.protocol === "icmp"}
               value={draft.portListId ? `list:${draft.portListId}` : "num"}
@@ -294,6 +299,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
       </div>
       <Field label="接続状態" term="stateful" hint="拒否ポリシーを「すべて」にすると、反対側から始めた通信の戻り（応答）まで止まります。">
         <Select
+          aria-label="接続状態"
           value={draft.connState ?? "all"}
           onChange={(v) => update((p) => (p.connState = v as FirewallPolicy["connState"]))}
           options={[
@@ -303,7 +309,8 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
           ]}
         />
       </Field>
-      <Field label="スケジュール" hint="シミュレーション時刻はポリシー一覧の右上で変えられます。">
+      <Field label="スケジュール" hint="ポリシー一覧やパケットトレースで、シミュレーション時刻を変更できます。"
+        error={invalidSchedule ? "曜日を1つ以上選び、開始・終了時刻を入力してください。" : undefined}>
         <Segmented<"always" | "custom">
           value={draft.schedule ? "custom" : "always"}
           onChange={(v) => update((p) => (p.schedule = v === "always" ? undefined : { days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }))}
@@ -319,6 +326,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
                 <button
                   key={d}
                   type="button"
+                  aria-pressed={draft.schedule!.days.includes(i)}
                   onClick={() => update((p) => (p.schedule!.days = p.schedule!.days.includes(i) ? p.schedule!.days.filter((x) => x !== i) : [...p.schedule!.days, i].sort()))}
                   className={clsx("size-7 rounded text-[12px]", draft.schedule!.days.includes(i) ? "bg-accent text-white" : "bg-surface-2 text-muted hover:text-fg")}
                 >
@@ -327,9 +335,15 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
               ))}
             </div>
             <div className="flex items-center gap-2">
-              <Input type="time" className="tnum w-32" value={draft.schedule.start} onChange={(e) => update((p) => (p.schedule!.start = e.target.value))} />
+              <Input aria-label="開始時刻" type="time" className="tnum w-32" value={draft.schedule.start} onInput={(e) => {
+                const time = e.currentTarget.value;
+                update((p) => (p.schedule!.start = time));
+              }} />
               <span className="text-muted">〜</span>
-              <Input type="time" className="tnum w-32" value={draft.schedule.end} onChange={(e) => update((p) => (p.schedule!.end = e.target.value))} />
+              <Input aria-label="終了時刻" type="time" className="tnum w-32" value={draft.schedule.end} onInput={(e) => {
+                const time = e.currentTarget.value;
+                update((p) => (p.schedule!.end = time));
+              }} />
             </div>
           </div>
         )}

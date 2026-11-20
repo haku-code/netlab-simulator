@@ -3,7 +3,7 @@ import { dnsReachable, probe } from "../emu";
 import { policy, wired } from "../scenarios/builders";
 import { defaultScenario } from "../scenarios/default";
 import { assignLeases, resolveClient, scheduleActive, trace } from "./simulate";
-import { validate } from "./validate";
+import { ruleCovers, validate } from "./validate";
 
 const fresh = () => assignLeases(defaultScenario());
 const t = (s: ReturnType<typeof fresh>, src: string, dst: string, protocol: "icmp" | "tcp" | "udp" = "icmp", port: number | null = null) =>
@@ -56,6 +56,13 @@ describe("objects", () => {
     expect(t(s, "iphone", "internet", "tcp", 443).ok).toBe(true);
     expect(t(s, "iphone", "internet", "tcp", 25).ok).toBe(false);
     expect(t(s, "pc", "internet", "tcp", 25).ok).toBe(true); // グループ外
+    expect(validate(s).filter((i) => i.area === "firewall")).toEqual([]);
+  });
+  it("does not report later policies as shadowed by a narrower schedule, state, or port list", () => {
+    const later = policy("b", "Block all", "block", "internal", "external");
+    expect(ruleCovers({ ...later, schedule: { days: [1], start: "22:00", end: "06:00" } }, later)).toBe(false);
+    expect(ruleCovers({ ...later, connState: "new" }, later)).toBe(false);
+    expect(ruleCovers({ ...later, portListId: "web" }, later)).toBe(false);
   });
 });
 
