@@ -1,16 +1,17 @@
 "use client";
 
 import clsx from "clsx";
-import { Cable, MonitorPlay, Plus, Wifi } from "lucide-react";
+import { Cable, MonitorPlay, Plus, Server, Wifi } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ClientIcon } from "@/components/icons";
 import { ClientPanel } from "@/components/panels/ClientPanel";
 import { Button, PageHeader, SearchInput, Segmented, Status, table as t } from "@/components/ui";
 import { useClientStates, useQueryId } from "@/lib/hooks";
-import { randomMac, uid, type Client } from "@/lib/model";
+import { randomMac, uid, type Client, type WebService } from "@/lib/model";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
 import { portBusy } from "@/lib/topo";
+import { webServer } from "@/lib/web";
 
 type Filter = "all" | "wired" | "wifi";
 
@@ -21,6 +22,7 @@ export default function ClientsPage() {
   const [selId, setSelId] = useQueryId();
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
+  const [serverError, setServerError] = useState("");
   const openWindow = useWindows((w) => w.open);
 
   const rows = useMemo(
@@ -44,6 +46,23 @@ export default function ClientsPage() {
   };
 
   const wiredCount = s.clients.filter((c) => c.connection.type === "wired").length;
+  const addServer = (kind: WebService["kind"]) => {
+    const available = s.devices
+      .filter((d) => d.type !== "ap")
+      .flatMap((device) => device.ports.filter((p) => p.enabled && p.nativeNetworkId && !portBusy(s, device.id, p.id)).map((port) => ({ device, port })))[0];
+    if (!available) {
+      setServerError("サーバー用に、ネイティブ VLAN を持つ空きポートを用意してください。");
+      return;
+    }
+    let index = 1;
+    let server = webServer(kind, available.device, available.port.idx, index);
+    while (s.clients.some((c) => c.id === server.id || c.webService?.host === server.webService?.host)) {
+      server = webServer(kind, available.device, available.port.idx, ++index);
+    }
+    mutate((sc) => sc.clients.push(server));
+    setServerError("");
+    setSelId(server.id);
+  };
 
   return (
     <>
@@ -62,6 +81,11 @@ export default function ClientsPage() {
           <Plus size={14} /> クライアントを追加
         </Button>
       </PageHeader>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Button onClick={() => addServer("website")}><Server size={14} /> Web サーバーを追加</Button>
+        <Button onClick={() => addServer("forum")}><Server size={14} /> 会員制掲示板を追加</Button>
+        {serverError && <span role="status" className="text-err">{serverError}</span>}
+      </div>
       <div className={t.wrap}>
         <table className={t.table}>
           <thead>

@@ -1,4 +1,5 @@
 import type { Scenario } from "../model";
+import { webServer } from "../web";
 import { access, link, makeDevice, network, policy, setPort, ssid, trunk, wifi, wired, zones } from "./builders";
 
 /** サンドボックスの初期構成: 家庭 + IoT + ゲスト */
@@ -33,6 +34,8 @@ export function defaultScenario(): Scenario {
       wifi("iphone", "iPhone", "phone", ap, "home"),
       wifi("tv", "Smart TV", "tv", ap, "home-iot"),
       wifi("guest-phone", "Guest Phone", "phone", ap, "guest"),
+      webServer("website", sw, 6, 1, "192.168.1.240"),
+      webServer("forum", sw, 7, 1, "192.168.1.241"),
     ],
     policies: [policy("p-lan-iot", "Allow Default to IoT", "allow", "internal", "iot", { src: "lan" })],
   };

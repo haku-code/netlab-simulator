@@ -8,9 +8,10 @@ import { netInfo } from "@/lib/emu";
 import { roomAt } from "@/lib/floor";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
+import { rememberWifiPassword, savedWifiPassword } from "@/lib/wifi";
 import { portBusy } from "@/lib/topo";
 import { CLIENT_KIND_LABEL, ClientIcon } from "../icons";
-import { Button, Field, Input, KV, Select, SidePanel, Status, Tabs, Toggle, useDraft } from "../ui";
+import { Button, Checkbox, Field, Input, KV, Select, SidePanel, Status, Tabs, Toggle, useDraft } from "../ui";
 
 type Tab = "overview" | "settings";
 
@@ -59,8 +60,16 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
             <Button variant="primary" disabled={!dirty} onClick={() =>
                 mutate((sc) => {
                   // 接続先や IP 設定が変わったら、端末はつなぎ直して DHCP を取り直す
-                  const relinked = JSON.stringify(draft.connection) !== JSON.stringify(client.connection) || draft.ipMode !== client.ipMode;
-                  sc.clients[sc.clients.findIndex((c) => c.id === client.id)] = relinked ? { ...draft, lease: null } : draft;
+                  const index = sc.clients.findIndex((c) => c.id === client.id);
+                  const previous = sc.clients[index];
+                  if (!previous) return;
+                  const relinked = JSON.stringify(draft.connection) !== JSON.stringify(previous.connection) || draft.ipMode !== previous.ipMode;
+                  const ssidBefore = previous.connection.type === "wifi" ? previous.connection.ssidId : null;
+                  const ssidAfter = draft.connection.type === "wifi" ? draft.connection.ssidId : null;
+                  rememberWifiPassword(sc, previous);
+                  const wifiPassword = ssidBefore === ssidAfter ? previous.wifiPassword : ssidAfter ? savedWifiPassword(previous, ssidAfter) ?? "" : "";
+                  const wifiIdentity = ssidBefore === ssidAfter ? previous.wifiIdentity : ssidAfter ? previous.wifiIdentities?.[ssidAfter] : undefined;
+                  sc.clients[index] = { ...draft, lease: relinked ? null : previous.lease, wifiPassword, wifiIdentity, wifiPasswords: previous.wifiPasswords, wifiIdentities: previous.wifiIdentities, webService: previous.webService };
                 })
               }>
               変更を適用
@@ -159,6 +168,10 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
                   onChange={(v) => update((c) => c.connection.type === "wifi" && (c.connection.ssidId = v || null))}
                   options={[{ value: "", label: "未接続" }, ...s.ssids.map((w) => ({ value: w.id, label: w.name }))]}
                 />
+              </Field>
+              <Field label="Wi-Fi 互換性">
+                <Checkbox checked={!!draft.wifiLegacyOnly} onChange={(v) => update((c) => (c.wifiLegacyOnly = v))} label="旧端末を模擬（WEP / WPA まで）" />
+                <Checkbox checked={!!draft.wifiCertificate} onChange={(v) => update((c) => (c.wifiCertificate = v))} label="実習用 Wi-Fi 証明書を登録" />
               </Field>
             </>
           )}

@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { useRef } from "react";
+import { isIPhone } from "@/lib/model";
 import { useStore } from "@/lib/store";
 import { useWindows, type EmuWindow } from "@/lib/windows";
 import { CLIENT_KIND_LABEL, ClientIcon } from "../icons";
@@ -64,7 +65,7 @@ function EmuFrame({ win }: { win: EmuWindow }) {
           <ClientIcon kind={client.kind} size={14} />
         </span>
         <span className="font-medium">{client.name}</span>
-        <span className="text-[12px] text-muted">{CLIENT_KIND_LABEL[client.kind]}</span>
+        <span className="text-[12px] text-muted">{client.kind === "phone" ? (isIPhone(client) ? "iPhone" : "Android 風") : CLIENT_KIND_LABEL[client.kind]}</span>
         <button
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => close(win.clientId)}

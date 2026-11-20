@@ -2,6 +2,7 @@
 import { WAN_IP } from "./emu";
 import type { Protocol, Scenario } from "./model";
 import { findGateway, resolveClient, type TraceQuery, type TraceResult } from "./net/simulate";
+import { clientWifiMode } from "./wifi-security";
 
 export const BROADCAST = "ff:ff:ff:ff:ff:ff";
 export const INTERNET_IP = "93.184.216.34";
@@ -14,6 +15,7 @@ export interface Frame {
   from: string;
   to: string;
   medium: "ethernet" | "wifi" | "wan";
+  wifi?: ReturnType<typeof clientWifiMode>;
   ethSrc: string;
   ethDst: string;
   vlan: number | null;
@@ -34,7 +36,7 @@ export interface Frame {
 const gwMac = (s: Scenario) => findGateway(s)?.mac ?? "00:00:00:00:00:01";
 const wanMac = (mac: string) => mac.replace(/..$/, (h) => ((parseInt(h, 16) + 1) % 256).toString(16).padStart(2, "0"));
 
-function ephemeralPort(seed: string) {
+export function ephemeralPort(seed: string) {
   let h = 0;
   for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return 49152 + (h % 16000);
@@ -53,6 +55,8 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
   const gwId = gw?.id;
   const internet = q.dst === "internet";
   const dst = internet ? null : resolveClient(s, q.dst);
+  const srcWifi = clientWifiMode(s, src.client);
+  const dstWifi = dst ? clientWifiMode(s, dst.client) : undefined;
   const dstIp = internet ? INTERNET_IP : dst?.ip;
   if (!dstIp) return [];
   const sameNet = !internet && dst?.network?.id === src.network.id;
@@ -87,6 +91,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
     from: nodeName(s, `c:${src.client.id}`),
     to: "ブロードキャスト",
     medium: firstLeg[0]?.medium ?? "ethernet",
+    wifi: srcWifi,
     ethSrc: src.client.mac,
     ethDst: BROADCAST,
     vlan: firstVlan,
@@ -102,6 +107,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       from: sameNet ? nodeName(s, `c:${dst!.client.id}`) : nodeName(s, gwId ?? ""),
       to: nodeName(s, `c:${src.client.id}`),
       medium: firstLeg[0]?.medium ?? "ethernet",
+      wifi: srcWifi,
       ethSrc: nextHopMac,
       ethDst: src.client.mac,
       vlan: firstVlan,
@@ -130,6 +136,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       from: nodeName(s, seg.from),
       to: nodeName(s, seg.to),
       medium: seg.medium,
+      wifi: seg.medium === "wifi" ? (seg.from === `c:${q.srcId}` ? srcWifi : dstWifi) : undefined,
       ethSrc: src.client.mac,
       ethDst: nextHopMac,
       vlan: seg.vlan,
@@ -179,6 +186,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
         from: nodeName(s, seg.from),
         to: nodeName(s, seg.to),
         medium: seg.medium,
+        wifi: seg.medium === "wifi" ? dstWifi : undefined,
         ethSrc: seg.medium === "wan" ? wanMac(gwMac(s)) : gwMac(s),
         ethDst: seg.medium === "wan" ? ISP_MAC : dst!.client.mac,
         vlan: seg.vlan,

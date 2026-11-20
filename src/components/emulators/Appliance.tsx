@@ -2,12 +2,15 @@
 
 import clsx from "clsx";
 import { useStore } from "@/lib/store";
+import { WEB_TLS } from "@/lib/web";
+import { Select } from "@/components/ui";
 import { WhyBox, WifiList, useEmu } from "./apps";
 
 /** プリンター / NAS / IoT 機器の前面パネル */
 export function Appliance({ clientId }: { clientId: string }) {
   const { client, info } = useEmu(clientId);
   const renew = useStore((x) => x.renewLease);
+  const mutate = useStore((x) => x.mutate);
   const st = info.st;
   const linkDown = st.errorStage === "attach";
   const led = linkDown ? "bg-err" : st.error ? "bg-warn animate-pulse" : "bg-ok";
@@ -45,6 +48,20 @@ export function Appliance({ clientId }: { clientId: string }) {
           </button>
         </div>
       </div>
+      {client.kind === "server" && client.webService && (
+        <div className="space-y-2 rounded border border-line bg-surface p-3 text-[12px]">
+          <p className="font-medium">{client.webService.kind === "forum" ? "会員制掲示板" : "Web サイト"}</p>
+          <p className="font-mono">http://{client.webService.host}</p>
+          {client.webService.tls !== "disabled" && <p className="font-mono">https://{client.webService.host}</p>}
+          <label className="block space-y-1">
+            <span>TLS 証明書</span>
+            <Select value={client.webService.tls} options={Object.entries(WEB_TLS).map(([value, label]) => ({ value, label }))} onChange={(v) => mutate((s) => {
+              const service = s.clients.find((c) => c.id === clientId)?.webService;
+              if (service) service.tls = v as keyof typeof WEB_TLS;
+            })} />
+          </label>
+        </div>
+      )}
       {client.connection.type === "wifi" && (
         <div>
           <div className="mb-2 text-[12px] font-medium text-muted">Wi-Fi セットアップ</div>

@@ -1,4 +1,5 @@
 import type { FirewallPolicy, Scenario } from "../model";
+import { wifiMode } from "../wifi-security";
 import { inSubnet, isHostAddr, overlaps, parseCidr, parseIp } from "./ip";
 import { CLIENT_REF, clientNetworkId, findNetwork, isClientRef, zoneName, zoneOfNetwork } from "./simulate";
 
@@ -111,6 +112,8 @@ export function validate(s: Scenario): Issue[] {
       out.push({ severity: "warning", area: "wifi", targetId: w.id, message: `SSID「${w.name}」はどの AP からも配信されていません`, hint: "配信 AP で配信する AP を選びます。" });
     if (w.security === "open")
       out.push({ severity: "warning", area: "wifi", targetId: w.id, message: `SSID「${w.name}」は暗号化なし (オープン) です`, hint: "ゲスト用でも WPA2/WPA3 を推奨します。" });
+    if (wifiMode(w.security).radio === "legacy")
+      out.push({ severity: "warning", area: "wifi", targetId: w.id, message: `SSID「${w.name}」は旧式の ${wifiMode(w.security).label} を使用しています`, hint: "利用端末が対応する WPA2 または WPA3 を選びます。" });
   }
 
   // --- DHCP 予約 ---

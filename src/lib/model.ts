@@ -1,3 +1,4 @@
+import type { WifiSecurity } from "./wifi-security";
 // ネットワーク構成のデータモデル。すべてブラウザ内で完結する仮想ネットワーク。
 
 import type { Floor } from "./floor";
@@ -85,7 +86,8 @@ export interface WifiSsid {
   id: string;
   name: string;
   networkId: string | null;
-  security: "wpa2" | "wpa3" | "open";
+  security: WifiSecurity;
+  enterpriseIdentity?: string;
   password: string;
   /** Client Device Isolation: 同じ SSID の無線クライアント同士の通信を遮断 */
   clientIsolation: boolean;
@@ -147,6 +149,13 @@ export interface Lease {
   networkId: string;
 }
 
+export type WebService = {
+  kind: "website" | "forum";
+  host: string;
+  tls: "trusted" | "expired" | "untrusted" | "disabled";
+  posts?: { id: string; author: string; body: string }[];
+};
+
 export interface Client {
   id: string;
   name: string;
@@ -157,14 +166,25 @@ export interface Client {
   ipMode: "dhcp" | "static";
   staticIp: string;
   lease: Lease | null;
-  /** 端末に保存されている Wi-Fi パスワード */
+  /** 現在選択している Wi-Fi の認証情報 */
   wifiPassword: string;
+  /** 接続済み Wi-Fi の認証情報（SSID ID ごと） */
+  wifiPasswords?: Record<string, string>;
+  wifiIdentities?: Record<string, string>;
+  wifiIdentity?: string;
+  wifiCertificate?: boolean;
+  wifiLegacyOnly?: boolean;
+  webService?: WebService;
   /** WPA3 に対応しているか（古い TV や IoT 機器は非対応） */
   wpa3: boolean;
   /** DHCP 予約: DHCP で常にこの IP を割り当てる（UniFi の Fixed IP Address） */
   reservedIp?: string;
   /** フロアプラン上の位置 (m) */
   pos?: XY;
+}
+
+export function isIPhone(client: Pick<Client, "id" | "name">) {
+  return client.id === "iphone" || /\biphone\b/i.test(client.name);
 }
 
 export interface Scenario {

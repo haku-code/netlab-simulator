@@ -1,5 +1,6 @@
 import {
   BUILTIN_ZONES,
+  isIPhone,
   randomMac,
   type Client,
   type ClientKind,
@@ -96,7 +97,7 @@ export function ssid(id: string, name: string, networkId: string | null, opts: P
 
 const VENDOR: Record<ClientKind, string> = {
   pc: "Dell",
-  phone: "Apple",
+  phone: "Generic",
   iot: "Espressif",
   server: "Synology",
   printer: "Brother",
@@ -108,7 +109,7 @@ export function wired(id: string, name: string, kind: ClientKind, dev: Device, p
     id,
     name,
     kind,
-    vendor: VENDOR[kind],
+    vendor: kind === "phone" && isIPhone({ id, name }) ? "Apple" : VENDOR[kind],
     mac: randomMac(id),
     connection: { type: "wired", deviceId: dev.id, portId: dev.ports[port - 1].id },
     ipMode: staticIp ? "static" : "dhcp",
@@ -124,7 +125,7 @@ export function wifi(id: string, name: string, kind: ClientKind, apDev: Device, 
     id,
     name,
     kind,
-    vendor: VENDOR[kind],
+    vendor: kind === "phone" && isIPhone({ id, name }) ? "Apple" : VENDOR[kind],
     mac: randomMac(id),
     connection: { type: "wifi", apId: apDev.id, ssidId },
     ipMode: "dhcp",

@@ -13,13 +13,21 @@ export const LISTEN: Record<ClientKind, number[]> = {
   printer: [80, 443, 631, 9100],
 };
 
+function listensOn(client: Client, protocol: Protocol, port: number) {
+  if (client.kind === "server" && client.webService) {
+    return protocol === "tcp" && (port === 80 || (port === 443 && client.webService.tls !== "disabled"));
+  }
+  return LISTEN[client.kind].includes(port);
+}
+
 export const WAN_IP = "203.0.113.24";
 
 export type Target =
   | { kind: "client"; client: Client; ip: string }
   | { kind: "gateway"; ip: string; networkId: string }
   | { kind: "internet"; host: string }
-  | { kind: "unknown"; ip: string };
+  | { kind: "unknown"; ip: string }
+  | { kind: "unresolved"; host: string };
 
 const isPrivate = (n: number) =>
   (n >>> 24 === 10) || (n >>> 20 === (172 << 4) + 1) || (n >>> 16 === (192 << 8) + 168);
@@ -27,7 +35,12 @@ const isPrivate = (n: number) =>
 /** ホスト名 / IP を宛先に解決する（DNS はゲートウェイが応答する想定） */
 export function resolveTarget(s: Scenario, host: string): Target {
   const ipNum = parseIp(host);
-  if (ipNum === null) return { kind: "internet", host };
+  if (ipNum === null) {
+    const server = s.clients.find((c) => c.kind === "server" && c.webService?.host === host.toLowerCase());
+    if (!server) return { kind: "internet", host };
+    const state = resolveClient(s, server.id);
+    return state.ip && !state.error ? { kind: "client", client: server, ip: state.ip } : { kind: "unresolved", host };
+  }
   for (const n of s.networks) if (n.gatewayIp === host) return { kind: "gateway", ip: host, networkId: n.id };
   for (const c of s.clients) {
     const st = resolveClient(s, c.id);
@@ -38,9 +51,9 @@ export function resolveTarget(s: Scenario, host: string): Target {
 }
 
 export type ProbeResult =
-  | { status: "ok"; hops: Hop[]; routed: boolean; target: Target }
-  | { status: "refused"; hops: Hop[]; routed: boolean; target: Target }
-  | { status: "timeout"; hops: Hop[]; summary: string; target: Target }
+  | { status: "ok"; hops: Hop[]; routed: boolean; target: Exclude<Target, { kind: "unresolved" }> }
+  | { status: "refused"; hops: Hop[]; routed: boolean; target: Exclude<Target, { kind: "unresolved" }> }
+  | { status: "timeout"; hops: Hop[]; summary: string; target: Exclude<Target, { kind: "unresolved" }> }
   | { status: "noip"; message: string }
   | { status: "dns"; message: string };
 
@@ -55,6 +68,7 @@ export function probe(s: Scenario, srcId: string, host: string, protocol: Protoc
   }
 
   const target = resolveTarget(s, host);
+  if (target.kind === "unresolved") return { status: "dns", message: `${host} に有効な IP アドレスがありません。` };
   if (target.kind === "unknown") {
     const sn = parseCidr(src.network.cidr);
     const same = sn && inSubnet(parseIp(target.ip)!, sn);
@@ -75,7 +89,7 @@ export function probe(s: Scenario, srcId: string, host: string, protocol: Protoc
   const r = trace(s, { srcId, dst: target.kind === "internet" ? "internet" : target.client.id, protocol, port });
   if (!r.ok) return { status: "timeout", target, summary: r.summary, hops: r.hops };
   const routed = target.kind === "internet" || resolveClient(s, target.client.id).network?.id !== src.network.id;
-  if (target.kind === "client" && protocol !== "icmp" && port !== null && !LISTEN[target.client.kind].includes(port))
+  if (target.kind === "client" && protocol !== "icmp" && port !== null && !listensOn(target.client, protocol, port))
     return { status: "refused", target, hops: r.hops, routed };
   return { status: "ok", target, hops: r.hops, routed };
 }
@@ -98,7 +112,7 @@ export function dnsReachable(s: Scenario, srcId: string): string | null {
   if (target.kind === "client") {
     const r = trace(s, { srcId, dst: target.client.id, protocol: "udp", port: 53 });
     if (!r.ok) return `DNS サーバー ${dns} (${target.client.name}) に届きません: ${r.summary}`;
-    if (!LISTEN[target.client.kind].includes(53)) return `${target.client.name} (${dns}) は DNS サーバーとして動いていません。`;
+    if (!listensOn(target.client, "udp", 53)) return `${target.client.name} (${dns}) は DNS サーバーとして動いていません。`;
     return null;
   }
   if (target.kind === "unknown") return `DNS サーバー ${dns} が見つかりません。`;
@@ -194,7 +208,7 @@ export function netInfo(s: Scenario, clientId: string): NetInfo {
   const sn = leaseNet ? parseCidr(leaseNet.cidr) : null;
   const mask = sn ? (Array.from({ length: 4 }, (_, i) => (((0xffffffff << (32 - sn.prefix)) >>> 0) >>> (24 - i * 8)) & 255).join(".")) : undefined;
   const linkUp = st.errorStage !== "attach";
-  const radio = ssid && c.connection.type === "wifi" && linkUp && st.attachDeviceId ? radioLink(s, c, ssid, st.attachDeviceId) : null;
+  const radio = ssid && st.attachDeviceId ? radioLink(s, c, ssid, st.attachDeviceId) : null;
   const apName = st.attachDeviceId ? s.devices.find((d) => d.id === st.attachDeviceId)?.name : undefined;
   return {
     st,
@@ -207,7 +221,7 @@ export function netInfo(s: Scenario, clientId: string): NetInfo {
     ssidName: ssid?.name,
     radio: radio ? `${apName} · ${radio.band} GHz · ch ${radio.channel} · ${radio.rssi} dBm · ${radio.rate} Mbps` : undefined,
     wifi: radio,
-    linkLabel: c.connection.type === "wired" ? (linkUp ? "Ethernet 接続済み · 1 Gbps" : "Ethernet: ケーブル未接続") : ssid && linkUp ? `Wi-Fi: ${ssid.name}` : "Wi-Fi 未接続",
+    linkLabel: c.connection.type === "wired" ? (linkUp ? "Ethernet 接続済み · 1 Gbps" : "Ethernet: ケーブル未接続") : ssid && radio ? `Wi-Fi: ${ssid.name}` : "Wi-Fi 未接続",
   };
 }
 
@@ -259,6 +273,7 @@ export function parseUrl(raw: string): { host: string; port: number; scheme: "ht
   if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
   try {
     const u = new URL(v);
+    if (!["http:", "https:"].includes(u.protocol) || !u.hostname || u.username || u.password) return null;
     const scheme = u.protocol === "https:" ? "https" : "http";
     const port = u.port ? Number(u.port) : scheme === "https" ? 443 : 80;
     return { host: u.hostname, port, scheme, path: u.pathname, display: `${scheme}://${u.hostname}${u.port ? `:${u.port}` : ""}${u.pathname === "/" ? "" : u.pathname}` };

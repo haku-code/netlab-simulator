@@ -10,6 +10,7 @@ import type {
   WifiSsid,
 } from "../model";
 import { CONNECT_DBM, rssiAt } from "../floor";
+import { negotiatedWifiSecurity, wifiCredentialsMatch, wifiMode, wifiSupports6GHz } from "../wifi-security";
 import { inSubnet, ipToStr, isHostAddr, parseCidr, parseIp } from "./ip";
 
 // ---------------------------------------------------------------------------
@@ -176,6 +177,12 @@ function hash(str: string) {
   return h;
 }
 
+function commonWifiBands(c: Client, ssid: WifiSsid) {
+  const supported = clientBands(c);
+  const allows6GHz = wifiSupports6GHz(negotiatedWifiSecurity(ssid.security, c));
+  return (["6", "5", "2.4"] as Band[]).filter((b) => (b !== "6" || allows6GHz) && ssid.bands.includes(b) && supported.includes(b));
+}
+
 // --- フロアプラン上の電波 -------------------------------------------------------
 
 export const isPositional = (s: Scenario, c: Client) => !!s.floor && !!c.pos;
@@ -183,7 +190,7 @@ export const isPositional = (s: Scenario, c: Client) => !!s.floor && !!c.pos;
 /** 位置と電波から、端末と AP の無線リンクを求める（よい帯域を優先、弱ければ 2.4 GHz に落ちる） */
 export function radioLink(s: Scenario, c: Client, ssid: WifiSsid, apId: string) {
   const ap = findDevice(s, apId);
-  const common = (["6", "5", "2.4"] as Band[]).filter((b) => ssid.bands.includes(b) && clientBands(c).includes(b));
+  const common = commonWifiBands(c, ssid);
   if (!ap || !common.length) return null;
   if (!isPositional(s, c) || !ap.pos) return wifiLink(c, ssid, apId);
   const links = common.map((band) => ({ band, rssi: rssiAt(s.floor!, ap, c.pos!, band) }));
@@ -215,7 +222,7 @@ export function broadcasts(ssid: WifiSsid, apId: string) {
 
 /** 端末と SSID の無線リンク（最も速い共通の周波数帯でつながる） */
 export function wifiLink(c: Client, ssid: WifiSsid, apId: string) {
-  const common = (["6", "5", "2.4"] as Band[]).filter((b) => ssid.bands.includes(b) && clientBands(c).includes(b));
+  const common = commonWifiBands(c, ssid);
   const band = common[0];
   if (!band) return null;
   const h = hash(c.id + apId);
@@ -240,6 +247,7 @@ export interface ClientState {
   toGateway?: L2Result;
   error?: string;
   errorStage?: "attach" | "ip";
+  wifiAuthFailed?: true;
   /** 古いネットワークで取得した IP を使い続けている */
   staleLease?: boolean;
 }
@@ -296,11 +304,17 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
         errorStage: "attach",
       };
     }
-    if (ssid.security === "wpa3" && !client.wpa3) {
+    const mode = negotiatedWifiSecurity(ssid.security, client);
+    if (wifiMode(mode).requiresWpa3 && !client.wpa3) {
       return { ...st, error: `この端末は WPA3 に対応していないため、SSID「${ssid.name}」に接続できません。`, errorStage: "attach" };
     }
-    if (ssid.security !== "open" && client.wifiPassword !== ssid.password) {
-      return { ...st, error: `SSID「${ssid.name}」の認証に失敗しました（パスワードが違います）。`, errorStage: "attach" };
+    if (client.wifiLegacyOnly && !["open", "wep", "wpa", "wpa-enterprise"].includes(mode)) {
+      return { ...st, error: "この端末は WEP / 初代 WPA まで対応します。", errorStage: "attach" };
+    }
+    if (!wifiCredentialsMatch(ssid, client)) {
+      const auth = wifiMode(mode).auth;
+      const reason = auth === "certificate" ? "実習用の端末証明書が登録されていません" : auth === "enterprise" ? "ユーザー名またはパスワードを確認してください" : "パスワードが違います";
+      return { ...st, error: `SSID「${ssid.name}」の認証に失敗しました（${reason}）。`, errorStage: "attach", wifiAuthFailed: true };
     }
     st.attachDeviceId = ap.id;
     const net = findNetwork(s, ssid.networkId);

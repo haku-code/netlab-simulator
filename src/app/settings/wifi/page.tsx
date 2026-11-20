@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Eye, EyeOff, Plus } from "lucide-react";
+import { Eye, EyeOff, Plus, Shield } from "lucide-react";
 import { useState } from "react";
 import { BackLink, Button, Checkbox, FormRow, FormSection, Input, Notice, PageHeader, Segmented, Select, Toggle, table as t, useDraft } from "@/components/ui";
 import { networkOptions, useIssues, useQueryId } from "@/lib/hooks";
@@ -9,7 +9,8 @@ import { uid, type Scenario, type WifiSsid } from "@/lib/model";
 import { findNetwork } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
 
-const SEC = { wpa3: "WPA3", wpa2: "WPA2", open: "認証なし" } as const;
+import { DEFAULT_ENTERPRISE_USER, WIFI_SECURITY as SEC, wifiMode, wifiSupports6GHz } from "@/lib/wifi-security";
+
 const BANDS = [
   { v: "2.4", l: "2.4 GHz" },
   { v: "5", l: "5 GHz" },
@@ -51,7 +52,7 @@ export default function WifiPage() {
                 <tr key={w.id} className={t.tr} onClick={() => setSelId(w.id)}>
                   <td className={clsx(t.td, "font-medium")}>{w.name}</td>
                   <td className={t.td}>{n ? n.name : <span className="text-err">未割当</span>}</td>
-                  <td className={clsx(t.td, "text-fg-2")}>{SEC[w.security]}</td>
+                  <td className={clsx(t.td, w.security === "open" ? "text-warn" : "text-fg-2")}>{SEC[w.security].label}</td>
                   <td className={clsx(t.td, "text-fg-2")}>{w.bands.map((b) => `${b} GHz`).join(", ")}</td>
                   <td className={clsx(t.td, "text-fg-2")}>
                     {!w.apIds ? "すべての AP" : s.devices.filter((d) => w.apIds!.includes(d.id)).map((d) => d.name).join(", ") || <span className="text-warn">なし</span>}
@@ -77,6 +78,7 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
   const { draft, update, dirty, reset } = useDraft<WifiSsid>(isNew ? blank : existing, id);
   const [showPw, setShowPw] = useState(false);
   if (!draft) return <BackLink onClick={onBack}>Wi-Fi</BackLink>;
+  const { auth } = wifiMode(draft.security);
   const inUse = s.clients.some((c) => c.connection.type === "wifi" && c.connection.ssidId === id);
 
   const save = () => {
@@ -101,18 +103,32 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
         <FormRow label="名前 (SSID)" term="ssid">
           <Input value={draft.name} onChange={(e) => update((w) => (w.name = e.target.value))} />
         </FormRow>
-        <FormRow label="パスワード">
+        <FormRow label="セキュリティ方式">
+          <label className="block">
+            <span className="sr-only">セキュリティ方式</span>
+            <Select value={draft.security} onChange={(v) => update((w) => (w.security = v as WifiSsid["security"]))} options={Object.entries(SEC).map(([value, { label }]) => ({ value, label }))} />
+          </label>
+        </FormRow>
+        {auth === "enterprise" && (
+          <FormRow label="実習用 802.1X ユーザー" hint="この SSID の仮想認証で照合するアカウントです。">
+            <Input aria-label="802.1X ユーザー" value={draft.enterpriseIdentity ?? DEFAULT_ENTERPRISE_USER} onChange={(e) => update((w) => (w.enterpriseIdentity = e.target.value))} />
+          </FormRow>
+        )}
+        {auth === "certificate" && <p className="text-[12px] text-muted">クライアントの設定で「実習用 Wi-Fi 証明書」を登録してから接続します。</p>}
+        <FormRow label={draft.security === "wep" ? "WEP キー" : "パスワード"}>
           <div className="relative">
             <Input
               type={showPw ? "text" : "password"}
+              aria-label="Wi-Fi パスワード"
               className="pr-9"
               value={draft.password}
-              disabled={draft.security === "open"}
+              disabled={auth === "none" || auth === "certificate"}
               onChange={(e) => update((w) => (w.password = e.target.value))}
             />
             <button
               type="button"
               onClick={() => setShowPw((v) => !v)}
+              disabled={auth === "none" || auth === "certificate"}
               className="absolute top-1/2 right-2 -translate-y-1/2 text-muted hover:text-fg"
               aria-label={showPw ? "パスワードを隠す" : "パスワードを表示"}
             >
@@ -120,6 +136,7 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
             </button>
           </div>
         </FormRow>
+        <WifiSecurityReview draft={draft} clients={s.clients} />
         <FormRow label="ネットワーク" term="vlan" hint="AP はこの SSID の通信を選んだネットワークの VLAN タグを付けて上流へ送ります。">
           <Select value={draft.networkId ?? ""} onChange={(v) => update((w) => (w.networkId = v || null))} options={networkOptions(s, { none: "なし" })} />
         </FormRow>
@@ -149,9 +166,6 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
         </FormRow>
       </FormSection>
       <FormSection title="詳細設定">
-        <FormRow label="セキュリティ方式">
-          <Select value={draft.security} onChange={(v) => update((w) => (w.security = v as WifiSsid["security"]))} options={Object.entries(SEC).map(([value, label]) => ({ value, label }))} />
-        </FormRow>
         <FormRow label="Wi-Fi 周波数帯">
           <div className="flex gap-4">
             {BANDS.map((b) => (
@@ -163,6 +177,9 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
               />
             ))}
           </div>
+          {draft.bands.includes("6") && !wifiSupports6GHz(draft.security) && (
+            <p className="mt-1 text-[12px] text-fg-2">この方式では 6 GHz を使えません。2.4 / 5 GHz を使用します。</p>
+          )}
         </FormRow>
         <FormRow label="クライアント間の分離" term="isolation">
           <div className="flex h-8 items-center">
@@ -197,5 +214,52 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
         )}
       </div>
     </div>
+  );
+}
+
+function WifiSecurityReview({ draft, clients }: { draft: WifiSsid; clients: Scenario["clients"] }) {
+  const { label, protection, risk } = SEC[draft.security];
+  const incompatible = wifiMode(draft.security).requiresWpa3
+    ? clients.filter((c) => !c.wpa3 && c.connection.type === "wifi" && c.connection.ssidId === draft.id)
+    : [];
+  const shortPassword = (wifiMode(draft.security).auth === "shared" || wifiMode(draft.security).auth === "enterprise")
+    && draft.security !== "wep" && [...draft.password].length < 16;
+
+  return (
+    <section className="my-2 space-y-3 rounded-lg border border-line bg-surface px-4 py-3 text-[12px]">
+      <h4 className="flex items-center gap-2 text-[13px] font-semibold">
+        <Shield size={15} className="text-accent" /> Wi-Fi セキュリティの確認
+      </h4>
+      <div aria-live="polite" className="space-y-2">
+        <p className="font-medium">{label}</p>
+        <dl className="grid gap-2 text-fg-2 sm:grid-cols-2 sm:gap-4">
+          <div>
+            <dt className="mb-0.5 font-medium text-fg">保護の範囲</dt>
+            <dd>{protection}</dd>
+          </div>
+          <div>
+            <dt className="mb-0.5 font-medium text-fg">残るリスクと対策</dt>
+            <dd>{risk}</dd>
+          </div>
+        </dl>
+        {shortPassword && (
+          <p className="text-warn">
+            {draft.password ? "パスワードは16文字未満です。" : "パスワードが未設定です。"}安全性の目安として、推測されにくい16文字以上のパスワードを使いましょう。
+          </p>
+        )}
+        {incompatible.length > 0 && (
+          <p className="text-warn">WPA3 に非対応のため接続できなくなる端末: {incompatible.map((c) => c.name).join("、")}</p>
+        )}
+      </div>
+      <details className="border-t border-line-soft pt-2 text-muted">
+        <summary className="cursor-pointer font-medium text-fg-2">実習用の旧方式と参考資料</summary>
+        <p className="mt-2">WEP と初代 WPA（TKIP）は暗号化の保護が弱い旧式の方式です。現在の機器では WPA3-Personal、互換性が必要なら WPA2-Personal（AES）を使います。</p>
+        <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-accent">
+          <li><a className="underline" href="https://support.apple.com/ja-jp/102766" target="_blank" rel="noreferrer">Apple の推奨設定</a></li>
+          <li><a className="underline" href="https://www.cisco.com/c/en/us/td/docs/wireless/controller/9800/26-1/configuration-guide/wl-26-1-cg/wpa3/overview-of-wpa3.html" target="_blank" rel="noreferrer">Cisco の WPA3 解説</a></li>
+          <li><a className="underline" href="https://www.cisa.gov/sites/default/files/2024-08/Federal-Mobile-Workplace-Security_508_2024-08-14.pdf#page=30" target="_blank" rel="noreferrer">CISA の Wi-Fi 設定指針</a></li>
+        </ul>
+      </details>
+    </section>
   );
 }

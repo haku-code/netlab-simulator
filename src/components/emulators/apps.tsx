@@ -7,10 +7,16 @@ import { netInfo, parseUrl, pingLines, probe, tracerouteLines, type ProbeResult 
 import { discover } from "@/lib/mdns";
 import { useRouter } from "next/navigation";
 import { CONNECT_DBM, VISIBLE_DBM } from "@/lib/floor";
-import { associate, broadcasts, clientBands, isPositional, resolveClient, wifiLink } from "@/lib/net/simulate";
+import { associate, broadcasts, clientBands, isPositional, radioLink, resolveClient, wifiLink } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
+import { usePcCapture } from "@/lib/pc-capture";
+import { browserPackets, pingPackets } from "@/lib/pc-packets";
+import { savedWifiPassword } from "@/lib/wifi";
+import { wifiMode } from "@/lib/wifi-security";
 import { TraceView } from "../TraceView";
 import { SitePage } from "./sites";
+import { WebCapture, WebLabSite } from "./WebLab";
+import { webError, type WebEvent } from "@/lib/web";
 
 export function useEmu(clientId: string) {
   const s = useStore((x) => x.scenario);
@@ -40,7 +46,7 @@ export function LinkIcon({ clientId, size = 14, className }: { clientId: string;
 }
 
 const WIFI_LEVELS = [WifiZero, WifiLow, WifiHigh, Wifi];
-const signalLevel = (rssi: number) => rssi > -55 ? 4 : rssi > -63 ? 3 : rssi > -70 ? 2 : 1;
+export const signalLevel = (rssi: number) => rssi > -55 ? 4 : rssi > -63 ? 3 : rssi > -70 ? 2 : 1;
 
 export function SignalBars({ rssi }: { rssi: number }) {
   const n = signalLevel(rssi);
@@ -172,9 +178,10 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
   const disconnect = useStore((x) => x.disconnectWifi);
   const [pending, setPending] = useState<string | null>(null);
   const [pw, setPw] = useState("");
+  const [identity, setIdentity] = useState("");
   const current = client.connection.type === "wifi" ? client.connection.ssidId : null;
   const hasAp = s.devices.some((d) => d.type === "ap");
-  const authError = current && info.st.errorStage === "attach" ? info.st.error : undefined;
+  const connectionError = current && info.st.errorStage === "attach" ? info.st.error : undefined;
 
   const router = useRouter();
   const positional = isPositional(s, client);
@@ -185,10 +192,10 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
   const visible = onAir.flatMap((w) => {
     if (positional) {
       const as = associate(s, client, w);
-      const best = as.ok ? { rssi: as.rssi } : as.best;
+      const best = as.ok ? as : as.best;
       if (!best || best.rssi < VISIBLE_DBM) return [];
-      const link = { ...wifiLink(client, w, apId ?? "")!, rssi: best.rssi };
-      return [{ w, link, weak: best.rssi < CONNECT_DBM }];
+      const link = radioLink(s, client, w, best.ap.id);
+      return link ? [{ w, link, weak: best.rssi < CONNECT_DBM }] : [];
     }
     const link = apId ? wifiLink(client, w, apId) : null;
     return link ? [{ w, link, weak: false }] : [];
@@ -201,46 +208,63 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
     <div className="space-y-2">
       <ul className={clsx("divide-y overflow-hidden rounded", dark ? "divide-white/10 bg-white/5" : "divide-line-soft border border-line")}>
         {visible.map(({ w, link, weak }) => {
-          const joined = current === w.id;
+          const selected = current === w.id;
+          const password = savedWifiPassword(client, w.id);
+          const { auth, radio } = wifiMode(w.security);
+          const savedIdentity = client.wifiIdentities?.[w.id];
+          const hasCredentials = password !== undefined && (auth === "shared" || (auth === "enterprise" && !!savedIdentity));
+          const retry = selected && info.st.wifiAuthFailed && (auth === "shared" || auth === "enterprise");
           return (
             <li key={w.id}>
               <button
                 onClick={() => {
-                  if (joined) return;
-                  if (w.security === "open") join(clientId, w.id, "");
-                  else {
-                    setPending(w.id);
-                    setPw("");
+                  setPw("");
+                  setIdentity("");
+                  if (selected) {
+                    setPending(null);
+                    return;
                   }
+                  if (auth === "none" || auth === "certificate" || hasCredentials) {
+                    setPending(null);
+                    join(clientId, w.id, hasCredentials ? password ?? "" : "", auth === "enterprise" ? savedIdentity : undefined);
+                  } else setPending(w.id);
                 }}
                 className={clsx("flex w-full items-center gap-2.5 px-3 py-2 text-left", dark ? "hover:bg-white/10" : "hover:bg-hover")}
               >
-                <span className="w-4">{joined && <Check size={14} className={authError ? "text-err" : "text-accent"} />}</span>
+                <span className="w-4">{selected && info.wifi && <Check size={14} className="text-accent" />}</span>
                 <span className="flex-1 truncate">
                   {w.name}
+                  {!selected && hasCredentials && <span className="ml-1.5 text-[10.5px] opacity-60"> 保存済み</span>}
                   {weak && <span className="ml-1.5 text-[10.5px] text-warn">電波が弱い</span>}
                 </span>
-                {w.security === "wpa3" && <span className="text-[10.5px] opacity-50">WPA3</span>}
-                {w.security !== "open" && <Lock size={12} className="opacity-50" />}
+                {radio === "legacy" && <span className="text-[10.5px] text-warn">旧方式</span>}
+                {radio !== "open" && <Lock size={12} className="opacity-50" />}
                 <span className="tnum text-[10.5px] opacity-50">{link.band}G</span>
                 <SignalBars rssi={link.rssi} />
               </button>
-              {pending === w.id && (
+              {(pending === w.id || (!pending && retry)) && (
                 <form
-                  className="flex gap-2 px-3 pb-2.5"
+                  className="grid gap-2 px-3 pb-2.5"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    join(clientId, w.id, pw);
+                    join(clientId, w.id, pw, auth === "enterprise" ? identity.trim() : undefined);
+                    setPw("");
+                    setIdentity("");
                     setPending(null);
                   }}
                 >
+                  {auth === "enterprise" && (
+                    <input aria-label="802.1X ユーザー名" placeholder="802.1X ユーザー名" value={identity} onChange={(e) => setIdentity(e.target.value)} required className="h-7 rounded border border-line px-2" />
+                  )}
                   <input
                     autoFocus
                     type="password"
+                    autoComplete="off"
+                    aria-label={`${w.name} のパスワード`}
                     value={pw}
                     onChange={(e) => setPw(e.target.value)}
                     placeholder="パスワード"
-                    className={clsx("h-7 flex-1 rounded border px-2 text-[12.5px] outline-none", dark ? "border-white/20 bg-white/10" : "border-line bg-surface focus:border-accent")}
+                    className={clsx("h-7 min-w-0 flex-1 rounded border px-2 text-[12.5px] outline-none", dark ? "border-white/20 bg-white/10" : "border-line bg-surface focus:border-accent")}
                   />
                   <button className="h-7 rounded bg-accent px-3 text-[12.5px] text-white">接続</button>
                 </form>
@@ -249,7 +273,7 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
           );
         })}
       </ul>
-      {authError && <p className="text-[12px] text-err">{authError}</p>}
+      {connectionError && <p className="text-[12px] text-err">{connectionError}</p>}
       {hidden > 0 && (
         <p className="text-[11.5px] opacity-60">
           この端末は {clientBands(client).join(" / ")} GHz のみ対応のため、表示されていない SSID が {hidden} 件あります。
@@ -277,7 +301,19 @@ export function Browser({ clientId, home = "", compact }: { clientId: string; ho
   const [input, setInput] = useState(home);
   const [url, setUrl] = useState<string | null>(home || null);
   const [tick, setTick] = useState(0);
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const [traffic, setTraffic] = useState<WebEvent>({ method: "GET", path: "/", status: "200 OK" });
   const parsed = url ? parseUrl(url) : null;
+  const recordTraffic = (address: string, event: WebEvent, newConnection: boolean) => {
+    setTraffic(event);
+    usePcCapture.getState().record(clientId, () => browserPackets(s, clientId, address, event, newConnection));
+  };
+  const navigate = (address: string) => {
+    setInput(address);
+    setUrl(address);
+    recordTraffic(address, { method: "GET", path: "/", status: "200 OK" }, true);
+    setTick((t) => t + 1);
+  };
   // 設定が変わると結果も変わる（再読み込みしなくても反映）
   const result = useMemo<ProbeResult | null>(
     () => (parsed ? probe(s, clientId, parsed.host, "tcp", parsed.port) : null),
@@ -285,17 +321,23 @@ export function Browser({ clientId, home = "", compact }: { clientId: string; ho
     [s, clientId, url, tick],
   );
 
+  const server = result && "target" in result && result.target.kind === "client" && result.target.client.kind === "server"
+    && result.target.client.webService ? result.target.client : null;
+  const problem = server?.webService && parsed && result?.status === "ok"
+    ? webError(server.webService, parsed.host, parsed.scheme, parsed.port)
+    : null;
+  const labServers = s.clients.filter((c) => c.kind === "server" && c.webService);
+
   return (
     <div className="flex h-full flex-col bg-white text-[#222]">
       <form
         className={clsx("flex items-center gap-1.5 border-b border-black/10 bg-[#f3f4f6]", compact ? "p-1.5" : "p-2")}
         onSubmit={(e) => {
           e.preventDefault();
-          setUrl(input);
-          setTick((t) => t + 1);
+          navigate(input);
         }}
       >
-        <button type="button" onClick={() => setTick((t) => t + 1)} className="rounded p-1 text-black/50 hover:bg-black/5" aria-label="再読み込み">
+        <button type="button" onClick={() => url && navigate(url)} className="rounded p-1 text-black/50 hover:bg-black/5" aria-label="再読み込み">
           <RotateCw size={13} />
         </button>
         <input
@@ -308,12 +350,36 @@ export function Browser({ clientId, home = "", compact }: { clientId: string; ho
           <ArrowRight size={14} />
         </button>
       </form>
+      {parsed && result && (
+        <div className="flex flex-wrap items-center justify-between gap-1 border-b border-black/10 px-2.5 py-1 text-[11px]">
+          <span>{parsed.scheme === "https" ? (result.status === "ok" && !problem ? "HTTPS · TLS" : "HTTPS") : "HTTP · 平文"}</span>
+          <button type="button" aria-expanded={captureOpen} onClick={() => setCaptureOpen(!captureOpen)} className="font-medium text-[#075aaa] underline">通信キャプチャ</button>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {captureOpen && parsed && result && (
+          <div className="border-b border-black/10 bg-[#eef4fa] p-3">
+            <WebCapture scenario={s} clientId={clientId} transport={parsed} result={result} problem={problem} event={traffic} />
+          </div>
+        )}
         {!parsed || !result ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-[12.5px] text-black/50">
             <p>アドレスを入力してください。</p>
-            <p>同じ家の機器（プリンター・NAS・スマートプラグ）の IP や、インターネットのサイト名を試せます。</p>
+            {labServers.map((c) => (
+              <div key={c.id} className="flex flex-wrap items-center justify-center gap-2">
+                <span>{c.name}</span>
+                <button className="font-medium text-[#075aaa] underline" onClick={() => navigate(`http://${c.webService!.host}`)}>HTTP</button>
+                <button className="font-medium text-[#075aaa] underline" onClick={() => navigate(`https://${c.webService!.host}`)}>HTTPS</button>
+              </div>
+            ))}
           </div>
+        ) : problem ? (
+          <div role="alert" className="space-y-2 p-4">
+            <h1 className="font-semibold">{parsed.scheme === "https" ? "TLS 接続に失敗しました" : "HTTP 接続に失敗しました"}</h1>
+            <p className="text-[13px]">{problem}</p>
+          </div>
+        ) : server && result.status === "ok" ? (
+          <WebLabSite key={parsed.display} server={server} onTraffic={(event) => recordTraffic(parsed.display, event, false)} />
         ) : (
           <SitePage key={`${url}-${tick}`} result={result} url={parsed.display} host={parsed.host} port={parsed.port} />
         )}
@@ -329,7 +395,16 @@ export function NetUtility({ clientId, dark }: { clientId: string; dark?: boolea
   const [tool, setTool] = useState<"ping" | "traceroute">("ping");
   const [host, setHost] = useState("");
   const [out, setOut] = useState<string[]>([]);
-  const run = () => host.trim() && setOut(tool === "ping" ? pingLines(s, clientId, host.trim()) : tracerouteLines(s, clientId, host.trim()));
+  const run = () => {
+    const target = host.trim();
+    if (!target) return;
+    if (tool === "ping") {
+      setOut(pingLines(s, clientId, target));
+      usePcCapture.getState().record(clientId, () => pingPackets(s, clientId, target));
+    } else {
+      setOut(tracerouteLines(s, clientId, target));
+    }
+  };
   return (
     <div className="flex h-full flex-col gap-2">
       <div className="flex gap-1">

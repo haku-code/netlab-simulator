@@ -9,6 +9,7 @@ import { ApWifi } from "@/components/panels/DevicePanel";
 import { Button, Card, KV, PageHeader, Segmented, Select, Status, Term } from "@/components/ui";
 import { quality, roomAt, rssiAt, autoFloor, type Band, type FloorTemplate } from "@/lib/floor";
 import { FLOOR_PRESETS } from "@/lib/floor-templates";
+import { useFloorPreview } from "@/lib/floor-preview";
 import { netInfo } from "@/lib/emu";
 import { useClientStates } from "@/lib/hooks";
 import type { ClientKind, XY } from "@/lib/model";
@@ -40,7 +41,9 @@ export default function FloorPlanPage() {
   const [ssidFilter, setSsidFilter] = useState("all");
   const [pendingTemplate, setPendingTemplate] = useState<FloorTemplate | null>(null);
   const [sel, setSel] = useState<Sel>(null);
-  const [drag, setDrag] = useState<{ kind: "client" | "device"; id: string; pos: XY; moved: boolean } | null>(null);
+  const drag = useFloorPreview((x) => x.drag);
+  const setDrag = useFloorPreview((x) => x.setDrag);
+  useEffect(() => () => setDrag(null), [setDrag]);
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -184,6 +187,7 @@ export default function FloorPlanPage() {
             className="w-full touch-none select-none"
             onPointerMove={onMove}
             onPointerUp={onUp}
+            onPointerCancel={() => setDrag(null)}
             onPointerDown={() => setSel(null)}
           >
             {/* 部屋 */}

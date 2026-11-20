@@ -7,15 +7,29 @@ import type { Frame } from "@/lib/capture";
 const changedCls = "bg-warn/20 font-semibold text-fg";
 
 /** Wireshark 風のパケット一覧 + 選択したフレームのヘッダー詳細 */
-export function CaptureView({ frames }: { frames: Frame[] }) {
+export function CaptureView({ frames, wirelessTools = false }: { frames: Frame[]; wirelessTools?: boolean }) {
   const [sel, setSel] = useState(0);
-  useEffect(() => setSel(frames.findIndex((f) => f.kind === "data") >= 0 ? frames.findIndex((f) => f.kind === "data") : 0), [frames]);
+  const [wireless, setWireless] = useState(false);
+  const canObserve = wirelessTools && frames.some((f) => f.medium === "wifi");
+  const observing = canObserve && wireless;
+  const shown = observing ? frames.filter((f) => f.medium === "wifi") : frames;
+  useEffect(() => {
+    const first = frames.filter((frame) => !observing || frame.medium === "wifi").findIndex((frame) => frame.kind === "data");
+    setSel(Math.max(0, first));
+  }, [frames, observing]);
   if (!frames.length) return <p className="px-4 py-6 text-center text-muted">送信元が IP を持っていないため、パケットを送れません。</p>;
-  const f = frames[Math.min(sel, frames.length - 1)];
+  const f = shown[Math.min(sel, shown.length - 1)];
+  const encrypted = observing && f.wifi?.radio === "protected";
   const c = (k: keyof Frame) => f.changed.includes(k);
 
   return (
     <div>
+      {canObserve && (
+        <div className="mb-3 space-y-1 text-[12px]">
+          <label className="flex items-center gap-2 font-medium"><input type="checkbox" checked={observing} onChange={(e) => setWireless(e.target.checked)} />無線区間を観測</label>
+          {observing && <p className="text-muted">WEP や初代 WPA は、無線側の保護が破られた場合の例として表示します。</p>}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="tnum w-full font-mono text-[11.5px]">
           <thead>
@@ -28,8 +42,9 @@ export function CaptureView({ frames }: { frames: Frame[] }) {
             </tr>
           </thead>
           <tbody>
-            {frames.map((x, i) => {
+            {shown.map((x, i) => {
               const ch = (k: keyof Frame) => (x.changed.includes(k) ? changedCls : "");
+              const hidden = observing && x.wifi?.radio === "protected";
               return (
                 <tr
                   key={x.no}
@@ -45,12 +60,12 @@ export function CaptureView({ frames }: { frames: Frame[] }) {
                   </td>
                   <td className={clsx("px-2 py-1", ch("ethSrc"))}>{x.ethSrc}</td>
                   <td className={clsx("px-2 py-1", ch("ethDst"))}>{x.ethDst}</td>
-                  <td className={clsx("px-2 py-1", ch("vlan"))}>{x.vlan ?? "—"}</td>
-                  <td className={clsx("px-2 py-1", ch("ipSrc"))}>{x.ipSrc ?? ""}</td>
-                  <td className={clsx("px-2 py-1", ch("ipDst"))}>{x.ipDst ?? ""}</td>
-                  <td className={clsx("px-2 py-1", ch("ttl"))}>{x.ttl ?? ""}</td>
-                  <td className="px-2 py-1">{x.medium === "wifi" && x.kind === "data" ? `802.11/${x.protocol}` : x.protocol}</td>
-                  <td className={clsx("px-2 py-1 font-sans", x.dropped && "text-err")}>{x.dropped ? `✕ ${x.info}` : x.info}</td>
+                  <td className={clsx("px-2 py-1", ch("vlan"))}>{observing ? "—" : x.vlan ?? "—"}</td>
+                  <td className={clsx("px-2 py-1", ch("ipSrc"))}>{hidden ? "—" : x.ipSrc ?? ""}</td>
+                  <td className={clsx("px-2 py-1", ch("ipDst"))}>{hidden ? "—" : x.ipDst ?? ""}</td>
+                  <td className={clsx("px-2 py-1", ch("ttl"))}>{hidden ? "—" : x.ttl ?? ""}</td>
+                  <td className="px-2 py-1">{hidden ? "802.11" : x.medium === "wifi" && x.kind === "data" ? `802.11/${x.protocol}` : x.protocol}</td>
+                  <td className={clsx("px-2 py-1 font-sans", x.dropped && "text-err")}>{hidden ? "フレーム本体は暗号化" : x.dropped ? `✕ ${x.info}` : x.info}</td>
                 </tr>
               );
             })}
@@ -74,13 +89,14 @@ export function CaptureView({ frames }: { frames: Frame[] }) {
         <Layer title={f.medium === "wifi" ? "IEEE 802.11 (Wi-Fi)" : f.medium === "wan" ? "Ethernet II (WAN)" : "Ethernet II"}>
           <Field k="送信元" v={f.ethSrc} hl={c("ethSrc")} />
           <Field k="宛先" v={f.ethDst} hl={c("ethDst")} />
+          {f.wifi && <Field k="Wi-Fi 方式" v={f.wifi.label} />}
         </Layer>
-        {f.vlan !== null && (
+        {!observing && f.vlan !== null && (
           <Layer title="802.1Q VLAN">
             <Field k="VLAN ID" v={String(f.vlan)} hl={c("vlan")} />
           </Layer>
         )}
-        {f.kind !== "data" ? (
+        {encrypted ? <div className="mt-1">フレーム本体は暗号化されています。</div> : f.kind !== "data" ? (
           <Layer title="ARP（アドレス解決プロトコル）">
             <Field k="操作コード" v={f.kind === "arp-request" ? "要求 (1)" : "応答 (2)"} />
             <Field k="" v={f.info} />
@@ -106,7 +122,7 @@ export function CaptureView({ frames }: { frames: Frame[] }) {
             )}
           </>
         )}
-        {(f.note || f.dropped) && (
+        {!encrypted && (f.note || f.dropped) && (
           <div className={clsx("mt-2 font-sans text-[12px]", f.dropped ? "text-err" : "text-fg-2")}>{f.dropped ?? f.note}</div>
         )}
       </div>

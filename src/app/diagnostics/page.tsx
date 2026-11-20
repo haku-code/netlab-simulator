@@ -10,6 +10,9 @@ import { buildCapture } from "@/lib/capture";
 import { trace } from "@/lib/net/simulate";
 import { CaptureView } from "@/components/theory/CaptureView";
 import { useScenario } from "@/lib/store";
+import { probe } from "@/lib/emu";
+import { webError } from "@/lib/web";
+import { WebCapture } from "@/components/emulators/WebLab";
 
 export default function DiagnosticsPage() {
   const s = useScenario();
@@ -37,6 +40,9 @@ export default function DiagnosticsPage() {
     if (!s.clients.some((c) => c.id === ran.srcId) || (ran.dst !== "internet" && !s.clients.some((c) => c.id === ran.dst))) return null;
     return trace(s, { ...ran, protocol, port: portNum });
   }, [s, ran, protocol, portNum]);
+  const webService = protocol === "tcp" && (portNum === 80 || portNum === 443)
+    ? s.clients.find((c) => c.id === ran?.dst && c.kind === "server")?.webService
+    : undefined;
 
   return (
     <>
@@ -103,7 +109,21 @@ export default function DiagnosticsPage() {
           {result && ran && (
             <Card title="パケットキャプチャ" action={<span className="text-[12px] text-muted">各区間のヘッダー · 黄色は前のフレームから変わった値</span>}>
               <div className="px-4 pb-4">
-                <CaptureView frames={buildCapture(s, { ...ran, protocol, port: portNum }, result)} />
+                <CaptureView frames={buildCapture(s, { ...ran, protocol, port: portNum }, result)} wirelessTools />
+              </div>
+            </Card>
+          )}
+          {result && ran && webService && (portNum === 80 || portNum === 443) && (
+            <Card title="HTTP / TLS の通信">
+              <div className="px-4 pb-4">
+                <WebCapture
+                  scenario={s}
+                  clientId={ran.srcId}
+                  transport={{ scheme: portNum === 443 ? "https" : "http", port: portNum }}
+                  result={probe(s, ran.srcId, webService.host, "tcp", portNum)}
+                  problem={webError(webService, webService.host, portNum === 443 ? "https" : "http", portNum)}
+                  event={{ method: "GET", path: "/", status: "200 OK" }}
+                />
               </div>
             </Card>
           )}
