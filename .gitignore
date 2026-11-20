@@ -19,6 +19,7 @@
 
 # production
 /build
+/.cloudflare/
 
 # misc
 .DS_Store
