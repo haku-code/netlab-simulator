@@ -1,0 +1,169 @@
+// ネットワーク構成のデータモデル。すべてブラウザ内で完結する仮想ネットワーク。
+
+import type { Floor } from "./floor";
+
+export interface XY {
+  x: number;
+  y: number;
+}
+
+export type DeviceType = "gateway" | "switch" | "ap";
+export type Protocol = "icmp" | "tcp" | "udp";
+
+/** Tagged VLAN Management: Allow All = trunk(全VLAN) / Block All = access / Custom = 指定VLANのみ */
+export type TaggedMode = "all" | "none" | "custom";
+
+export interface Port {
+  id: string;
+  /** 1 始まりのポート番号 */
+  idx: number;
+  name: string;
+  /** Native VLAN (タグなしで流れるネットワーク) */
+  nativeNetworkId: string | null;
+  tagged: TaggedMode;
+  /** tagged === "custom" のときに許可するネットワーク */
+  taggedNetworkIds: string[];
+  enabled: boolean;
+  speed: string;
+}
+
+export interface Device {
+  id: string;
+  type: DeviceType;
+  name: string;
+  model: string;
+  mac: string;
+  ip: string;
+  ports: Port[];
+  /** フロアプラン上の位置 (m) */
+  pos?: XY;
+  /** AP の送信出力 */
+  txPower?: "high" | "medium" | "low";
+}
+
+export interface PortRef {
+  deviceId: string;
+  portId: string;
+}
+
+/** 機器同士のケーブル接続 */
+export interface Link {
+  id: string;
+  a: PortRef;
+  b: PortRef;
+}
+
+export interface Network {
+  id: string;
+  name: string;
+  vlanId: number;
+  /** 例: 192.168.1.0/24 */
+  cidr: string;
+  gatewayIp: string;
+  dhcp: { enabled: boolean; start: string; end: string };
+  /** Isolate Network: 他の内部ネットワークとの通信を遮断 */
+  isolateNetwork: boolean;
+  internetAccess: boolean;
+  zoneId: string;
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+  builtin: boolean;
+}
+
+export interface WifiSsid {
+  id: string;
+  name: string;
+  networkId: string | null;
+  security: "wpa2" | "wpa3" | "open";
+  password: string;
+  /** Client Device Isolation: 同じ SSID の無線クライアント同士の通信を遮断 */
+  clientIsolation: boolean;
+  /** Broadcasting APs: 配信する AP の ID。未指定 = すべての AP */
+  apIds?: string[];
+  bands: ("2.4" | "5" | "6")[];
+}
+
+export interface FirewallPolicy {
+  id: string;
+  name: string;
+  action: "allow" | "block";
+  srcZone: string;
+  /** "any" / ネットワーク ID / "client:<端末 ID>"（端末単位） */
+  src: string;
+  dstZone: string;
+  dst: string;
+  protocol: "all" | Protocol;
+  port: number | null;
+  enabled: boolean;
+}
+
+export type ClientKind = "pc" | "phone" | "iot" | "server" | "printer" | "tv";
+
+export type ClientConnection =
+  /** deviceId/portId が null = LAN ケーブルが抜けている */
+  | { type: "wired"; deviceId: string | null; portId: string | null }
+  /** ssidId が null = どの Wi-Fi にも接続していない */
+  | { type: "wifi"; apId: string; ssidId: string | null };
+
+/** DHCP で受け取った IP。端末は再接続/更新するまでこれを使い続ける */
+export interface Lease {
+  ip: string;
+  networkId: string;
+}
+
+export interface Client {
+  id: string;
+  name: string;
+  kind: ClientKind;
+  vendor: string;
+  mac: string;
+  connection: ClientConnection;
+  ipMode: "dhcp" | "static";
+  staticIp: string;
+  lease: Lease | null;
+  /** 端末に保存されている Wi-Fi パスワード */
+  wifiPassword: string;
+  /** WPA3 に対応しているか（古い TV や IoT 機器は非対応） */
+  wpa3: boolean;
+  /** フロアプラン上の位置 (m) */
+  pos?: XY;
+}
+
+export interface Scenario {
+  networks: Network[];
+  zones: Zone[];
+  devices: Device[];
+  links: Link[];
+  clients: Client[];
+  ssids: WifiSsid[];
+  /** ゾーンの組ごとに上から順に評価される */
+  policies: FirewallPolicy[];
+  /** mDNS リフレクター: 指定したネットワーク間でサービス広告 (Bonjour) を中継する */
+  mdns?: { enabled: boolean; networkIds: string[] };
+  /** 間取り。あると無線は位置と電波強度で AP を選ぶ */
+  floor?: Floor;
+}
+
+export const BUILTIN_ZONES: Zone[] = [
+  { id: "internal", name: "Internal", builtin: true },
+  { id: "external", name: "External", builtin: true },
+  { id: "gateway", name: "Gateway", builtin: true },
+  { id: "hotspot", name: "Hotspot", builtin: true },
+  { id: "dmz", name: "DMZ", builtin: true },
+  { id: "vpn", name: "VPN", builtin: true },
+];
+
+/** 端末がつながっている機器（スイッチ/AP）の ID */
+export const attachedTo = (c: Client): string | null => (c.connection.type === "wired" ? c.connection.deviceId : c.connection.apId);
+
+export const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+
+export function randomMac(seed: string) {
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const b = [0x74, 0xac, 0xb9, (h >>> 16) & 255, (h >>> 8) & 255, h & 255];
+  return b.map((x) => x.toString(16).padStart(2, "0")).join(":");
+}

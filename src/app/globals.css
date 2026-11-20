@@ -1,26 +1,116 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+:root,
+:root[data-theme="light"] {
+  --bg: #f4f5f6;
+  --surface: #ffffff;
+  --surface-2: #f6f7f8;
+  --hover: #f1f2f4;
+  --line: #e3e5e8;
+  --line-soft: #eef0f2;
+  --fg: #212327;
+  --fg-2: #50565e;
+  --muted: #808893;
+  --faint: #b6b9bf;
+  --accent: #006fff;
+  --accent-hover: #005ed9;
+  --accent-soft: #e5f0ff;
+  --ok: #38b261;
+  --warn: #f5a524;
+  --err: #ee4049;
+  --chrome: #ffffff;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #151618;
+  --surface: #1d1e21;
+  --surface-2: #232528;
+  --hover: #26282c;
+  --line: #2e3034;
+  --line-soft: #26282b;
+  --fg: #e7e8ea;
+  --fg-2: #b4b8be;
+  --muted: #8a9099;
+  --faint: #5c6168;
+  --accent: #2f86ff;
+  --accent-hover: #4b96ff;
+  --accent-soft: rgba(47, 134, 255, 0.14);
+  --ok: #45c06e;
+  --warn: #f5a524;
+  --err: #f0555d;
+  --chrome: #1a1b1e;
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-hover: var(--hover);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-chrome: var(--chrome);
+  --font-sans: var(--font-inter), "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: var(--font-inter), ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+/* 数字は等幅で揃える（IP・MAC 表示用） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--surface);
+  border-color: var(--line);
+  fill: var(--fg-2);
+  width: 26px;
+  height: 26px;
+}
+.react-flow__controls-button:hover {
+  background: var(--hover);
+}
+.react-flow__handle {
+  opacity: 0;
 }
