@@ -62,6 +62,13 @@ export default function DashboardPage() {
   return (
     <div className="space-y-4">
       <h1 className="text-[15px] font-semibold">ダッシュボード</h1>
+      <Card className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div>
+          <h2 className="font-semibold">ネットワークを初めて学ぶ方へ</h2>
+          <p className="text-[12.5px] text-fg-2">PC をつないで、Web サイトがどう開くかを試せます。</p>
+        </div>
+        <Link href="/learn" className="rounded bg-accent px-3 py-1.5 text-[13px] font-medium text-white hover:bg-accent-hover">入門をはじめる</Link>
+      </Card>
       <div className="grid gap-4 lg:grid-cols-4">
         <Card className="p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">

@@ -61,11 +61,13 @@ const NAV = [
   { href: "/clients", label: "クライアント", icon: MonitorSmartphone },
   { href: "/diagnostics", label: "パケットトレース", icon: Radar },
   { href: "/logs", label: "ログ", icon: ScrollText },
-  { href: "/lessons", label: "学習", icon: GraduationCap },
+  { href: "/learn", label: "学習", icon: GraduationCap },
 ];
 
-export function Shell({ children }: { children: ReactNode }) {
+export function Shell({ children, version, repositoryUrl }: { children: ReactNode; version: string; repositoryUrl: string }) {
   const [mounted, setMounted] = useState(false);
+  const path = usePathname();
+  const learningPage = path === "/lessons" || path === "/theory" || path.startsWith("/learn");
   const theme = useStore((s) => s.theme);
   useEffect(() => setMounted(true), []);
   useEffect(() => {
@@ -74,14 +76,14 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
-      {mounted ? <Header /> : <div className="h-12 border-b border-line bg-chrome" />}
+      {mounted ? <Header learningPage={learningPage} /> : <div className="h-12 border-b border-line bg-chrome" />}
       <div className="flex min-h-0 flex-1">
-        <Sidebar />
+        <Sidebar version={version} repositoryUrl={repositoryUrl} />
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 md:px-6">
           <Suspense>{mounted ? children : null}</Suspense>
         </main>
       </div>
-      {mounted && <LessonPanel />}
+      {mounted && !learningPage && <LessonPanel />}
       {mounted && <EmulatorWindows />}
     </div>
   );
@@ -105,21 +107,24 @@ function NavItem({ href, label, icon: Icon, active }: { href: string; label: str
   );
 }
 
-function Sidebar() {
+function Sidebar({ version, repositoryUrl }: { version: string; repositoryUrl: string }) {
   const path = usePathname();
   return (
     <nav className="flex w-[52px] shrink-0 flex-col items-center gap-1 border-r border-line bg-chrome py-2">
       {NAV.map((n) => (
-        <NavItem key={n.href} {...n} active={path.startsWith(n.href) || (n.href === "/lessons" && path.startsWith("/theory"))} />
+        <NavItem key={n.href} {...n} active={path.startsWith(n.href) || (n.href === "/learn" && (path.startsWith("/theory") || path.startsWith("/lessons")))} />
       ))}
-      <div className="mt-auto">
+      <div className="mt-auto flex flex-col items-center gap-1">
         <NavItem href="/settings/networks" label="設定" icon={Settings} active={path.startsWith("/settings")} />
+        <a href={repositoryUrl} target="_blank" rel="noreferrer" className="rounded px-1 py-0.5 text-[10px] text-fg-2 hover:bg-hover hover:underline"
+          aria-label="NetLab の GitHub リポジトリ">GitHub</a>
+        <span className="font-mono text-[10px] text-muted" aria-label={`NetLab バージョン ${version}`}>v{version}</span>
       </div>
     </nav>
   );
 }
 
-function Header() {
+function Header({ learningPage }: { learningPage: boolean }) {
   const { theme, toggleTheme, activeLessonId, resetScenario, setLessonPanelOpen } = useStore();
   const issues = useIssues();
   const lesson = LESSONS.find((l) => l.id === activeLessonId);
@@ -135,9 +140,9 @@ function Header() {
       <span className="font-semibold">NetLab</span>
       <span className="flex h-7 items-center rounded px-2 text-fg-2">
         {lesson ? (
-          <button onClick={() => setLessonPanelOpen(true)} className="text-accent hover:underline">
-            {lesson.title}
-          </button>
+          learningPage
+            ? <Link href="/diagnostics" className="text-accent hover:underline">{lesson.title}</Link>
+            : <button onClick={() => setLessonPanelOpen(true)} className="text-accent hover:underline">{lesson.title}</button>
         ) : (
           "サンドボックス"
         )}
@@ -184,13 +189,14 @@ function GlobalSearch() {
   const results = useMemo(() => {
     const k = q.trim().toLowerCase();
     if (!k) return [];
+    // ID はネットワークと SSID で重なることがある（例: guest）ので、key には種類を付ける
     return [
-      ...s.devices.filter((d) => d.name.toLowerCase().includes(k)).map((d) => ({ key: d.id, label: d.name, sub: d.model, href: `/devices?id=${d.id}`, icon: <DeviceGlyph type={d.type} size={20} /> })),
-      ...s.clients.filter((c) => c.name.toLowerCase().includes(k)).map((c) => ({ key: c.id, label: c.name, sub: c.vendor, href: `/clients?id=${c.id}`, icon: <ClientIcon kind={c.kind} /> })),
-      ...s.networks.filter((n) => n.name.toLowerCase().includes(k)).map((n) => ({ key: n.id, label: n.name, sub: `VLAN ${n.vlanId}`, href: `/settings/networks?id=${n.id}`, icon: <Network size={16} /> })),
-      ...s.ssids.filter((w) => w.name.toLowerCase().includes(k)).map((w) => ({ key: w.id, label: w.name, sub: "Wi-Fi (SSID)", href: `/settings/wifi?id=${w.id}`, icon: <Wifi size={16} /> })),
+      ...s.devices.filter((d) => d.name.toLowerCase().includes(k)).map((d) => ({ key: `device:${d.id}`, label: d.name, sub: d.model, href: `/devices?id=${d.id}`, icon: <DeviceGlyph type={d.type} size={20} /> })),
+      ...s.clients.filter((c) => c.name.toLowerCase().includes(k)).map((c) => ({ key: `client:${c.id}`, label: c.name, sub: c.vendor, href: `/clients?id=${c.id}`, icon: <ClientIcon kind={c.kind} /> })),
+      ...s.networks.filter((n) => n.name.toLowerCase().includes(k)).map((n) => ({ key: `network:${n.id}`, label: n.name, sub: `VLAN ${n.vlanId}`, href: `/settings/networks?id=${n.id}`, icon: <Network size={16} /> })),
+      ...s.ssids.filter((w) => w.name.toLowerCase().includes(k)).map((w) => ({ key: `ssid:${w.id}`, label: w.name, sub: "Wi-Fi (SSID)", href: `/settings/wifi?id=${w.id}`, icon: <Wifi size={16} /> })),
       // 設定ページへのショートカット（「パスワード」「VLAN」などでも探せる）
-      ...SETTING_PAGES.filter((p) => p.words.some((w) => w.toLowerCase().includes(k) || k.includes(w.toLowerCase()))).map((p) => ({ key: p.href, label: p.label, sub: "設定", href: p.href, icon: <Settings size={16} /> })),
+      ...SETTING_PAGES.filter((p) => p.words.some((w) => w.toLowerCase().includes(k) || k.includes(w.toLowerCase()))).map((p) => ({ key: `page:${p.href}`, label: p.label, sub: "設定", href: p.href, icon: <Settings size={16} /> })),
     ].slice(0, 10);
   }, [q, s]);
 

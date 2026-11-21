@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Shell } from "@/components/shell/Shell";
+import packageInfo from "../../package.json";
 import "./globals.css";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
@@ -14,7 +15,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="ja" data-theme="light" suppressHydrationWarning>
       <body className={`${inter.variable} antialiased`}>
-        <Shell>{children}</Shell>
+        <Shell version={packageInfo.version} repositoryUrl={packageInfo.repository.url}>{children}</Shell>
       </body>
     </html>
   );

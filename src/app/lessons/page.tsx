@@ -1,10 +1,10 @@
 "use client";
 
-import clsx from "clsx";
+import { useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { CourseTabs } from "@/components/theory/CourseTabs";
-import { Button, PageHeader, table as t } from "@/components/ui";
+import { CourseLayout, CourseUnit, LearningHeader } from "@/components/learning/CourseLayout";
+import { Button, Card } from "@/components/ui";
 import { GLOSSARY } from "@/lib/glossary";
 import { LESSONS } from "@/lib/lessons";
 import { useStore } from "@/lib/store";
@@ -12,74 +12,74 @@ import { useStore } from "@/lib/store";
 const LEVEL = { 1: "初級", 2: "中級", 3: "上級" } as const;
 
 export default function LessonsPage() {
-  const { completed, activeLessonId, startLesson, exitLesson } = useStore();
+  const completed = useStore((s) => s.completed);
+  const activeLessonId = useStore((s) => s.activeLessonId);
+  const startLesson = useStore((s) => s.startLesson);
+  const exitLesson = useStore((s) => s.exitLesson);
   const router = useRouter();
+  const [selected, setSelected] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const lesson = LESSONS.find((item) => item.id === (selected ?? activeLessonId)) ?? LESSONS[0];
+  const active = activeLessonId === lesson.id;
+  const done = completed.includes(lesson.id);
 
-  const start = (id: string) => {
-    if (activeLessonId === id) return router.push("/diagnostics");
-    if (!confirm("課題を開始すると、現在の構成は課題用の構成に置き換わります（サンドボックスは課題終了時に戻ります）。開始しますか？")) return;
-    startLesson(id);
+  const start = () => {
+    if (!active && !confirming) {
+      setConfirming(true);
+      return;
+    }
+    if (!active) startLesson(lesson.id);
     router.push("/diagnostics");
   };
 
   return (
     <>
-      <PageHeader title="学習" count={LESSONS.length}>
-        <span className="mr-auto">
-          <CourseTabs value="practice" />
-        </span>
-        <span className="text-[12px] text-muted">
-          {completed.length} / {LESSONS.length} クリア
-        </span>
-        {activeLessonId && <Button onClick={exitLesson}>サンドボックスに戻る</Button>}
-      </PageHeader>
-      <div className={t.wrap}>
-        <table className={t.table}>
-          <thead>
-            <tr>
-              <th className={clsx(t.th, "w-10")}>#</th>
-              <th className={t.th}>課題</th>
-              <th className={t.th}>レベル</th>
-              <th className={t.th}>テーマ</th>
-              <th className={t.th}>状態</th>
-              <th className={t.th} />
-            </tr>
-          </thead>
-          <tbody>
-            {LESSONS.map((l, i) => {
-              const done = completed.includes(l.id);
-              const active = activeLessonId === l.id;
-              return (
-                <tr key={l.id} className={clsx(active && t.sel)}>
-                  <td className={clsx(t.td, "tnum text-muted")}>{i + 1}</td>
-                  <td className={clsx(t.td, "whitespace-normal py-3")}>
-                    <div className="font-medium">{l.title}</div>
-                    <div className="text-[12px] text-muted">{l.summary}</div>
-                  </td>
-                  <td className={clsx(t.td, "text-fg-2")}>{LEVEL[l.level]}</td>
-                  <td className={clsx(t.td, "text-fg-2")}>{l.concepts.map((c) => GLOSSARY[c]?.term ?? c).join(", ")}</td>
-                  <td className={t.td}>
-                    {done ? (
-                      <span className="inline-flex items-center gap-1.5 text-ok">
-                        <CheckCircle2 size={14} /> クリア
-                      </span>
-                    ) : active ? (
-                      <span className="text-accent">挑戦中</span>
-                    ) : (
-                      <span className="text-muted">未挑戦</span>
-                    )}
-                  </td>
-                  <td className={clsx(t.td, "text-right")}>
-                    <Button variant={active ? "secondary" : "primary"} onClick={() => start(l.id)}>
-                      {active ? "続ける" : done ? "もう一度" : "開始"}
-                    </Button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <LearningHeader course="practice" progress={`${completed.length} / ${LESSONS.length} クリア`} />
+      <CourseLayout label="実践課題" units={LESSONS.map((item, i) => (
+        <CourseUnit key={item.id} title={item.title} index={i + 1}
+          detail={item.id === activeLessonId ? `${LEVEL[item.level]} · 挑戦中` : LEVEL[item.level]}
+          selected={lesson.id === item.id} completed={completed.includes(item.id)} onSelect={() => {
+            setSelected(item.id);
+            setConfirming(false);
+          }} />
+      ))}>
+        <Card className="p-5">
+          <div className="mb-1 flex items-center gap-2 text-[12px] text-muted">
+            {LEVEL[lesson.level]}
+            {active && <span className="text-accent">挑戦中</span>}
+            {done && <span className="inline-flex items-center gap-1 text-ok"><CheckCircle2 size={13} /> クリア済み</span>}
+          </div>
+          <h2 className="mb-2 text-[18px] font-semibold">{lesson.title}</h2>
+          <p className="mb-2 font-medium">{lesson.summary}</p>
+          <p className="leading-relaxed text-fg-2">{lesson.story}</p>
+        </Card>
+        <Card title="クリア条件">
+          <div className="space-y-4 px-5 pb-5">
+            <ul className="list-disc space-y-1 pl-5 text-fg-2">
+              {lesson.goals.map((goal) => <li key={goal}>{goal}</li>)}
+            </ul>
+            {confirming ? (
+              <div className="space-y-2 rounded border border-line bg-surface-2 p-3">
+                <p role="status" className="text-fg-2">課題用の構成に切り替えます。課題を終了すると、元のサンドボックスに戻ります。</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="primary" onClick={start}>この課題を始める</Button>
+                  <Button onClick={() => setConfirming(false)}>キャンセル</Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <Button variant="primary" onClick={start}>{active ? "続ける" : done ? "もう一度" : "課題を開始"}</Button>
+                {activeLessonId && <Button onClick={exitLesson}>サンドボックスに戻る</Button>}
+              </div>
+            )}
+          </div>
+        </Card>
+        <Card title="関連用語">
+          <ul className="flex flex-wrap gap-1.5 px-5 pb-5 text-[12px] text-fg-2">
+            {lesson.concepts.map((id) => <li key={id} className="rounded border border-line px-2 py-1">{GLOSSARY[id]?.term ?? id}</li>)}
+          </ul>
+        </Card>
+      </CourseLayout>
     </>
   );
 }

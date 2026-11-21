@@ -1,6 +1,10 @@
 {
   "name": "netlab",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/haku-code/netlab-simulator"
+  },
   "private": true,
   "scripts": {
     "dev": "next dev",
