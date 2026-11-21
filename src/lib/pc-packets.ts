@@ -1,5 +1,5 @@
 import type { Scenario } from "./model";
-import { INTERNET_IP, ephemeralPort } from "./capture";
+import { ephemeralPort } from "./capture";
 import { dnsServerOf, parseUrl, probe, type ProbeResult } from "./emu";
 import { parseIp } from "./net/ip";
 import { resolveClient } from "./net/simulate";
@@ -55,7 +55,7 @@ export function observeWifiPackets(packets: PcPacket[], context: NonNullable<Ret
 
 function targetIp(result: ProbeResult) {
   if (!("target" in result)) return undefined;
-  return result.target.kind === "internet" ? INTERNET_IP : result.target.ip;
+  return result.target.ip;
 }
 
 function dnsPackets(s: Scenario, clientId: string, source: string, host: string, result: ProbeResult): PcPacket[] {

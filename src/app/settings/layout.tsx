@@ -11,6 +11,8 @@ const GROUPS = [
       { href: "/settings/wifi", label: "Wi-Fi", area: "wifi" },
       { href: "/settings/networks", label: "ネットワーク", area: "networks" },
       { href: "/settings/internet", label: "インターネット" },
+      { href: "/settings/routing", label: "ルーティング・VPN" },
+      { href: "/settings/qos", label: "QoS" },
     ],
   },
   {
@@ -19,6 +21,7 @@ const GROUPS = [
       { href: "/settings/zones", label: "ゾーン" },
       { href: "/settings/policies", label: "ポリシー一覧", area: "firewall" },
       { href: "/settings/objects", label: "オブジェクト" },
+      { href: "/settings/forwarding", label: "ポートフォワード" },
     ],
   },
 ];

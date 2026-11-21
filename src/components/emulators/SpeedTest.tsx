@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, Timer } from "lucide-react";
 import { speedTest, type SpeedTestResult } from "@/lib/emu";
+import { QOS_LABELS, WAN_NAMES } from "@/lib/net/gateway";
 import { useStore } from "@/lib/store";
 
 export function SpeedTest({ clientId }: { clientId: string }) {
@@ -26,6 +27,7 @@ export function SpeedTest({ clientId }: { clientId: string }) {
           ))}
         </dl>
         {result && !result.ok && <p>測定できませんでした。{result.reason}</p>}
+        {result?.ok && <p className="opacity-70">{WAN_NAMES[result.wan]} · 優先度 {QOS_LABELS[result.priority]} · 競合フロー {result.backgroundFlows}</p>}
       </div>
       <button
         type="button"

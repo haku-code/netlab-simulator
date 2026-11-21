@@ -7,11 +7,14 @@ import type {
   Port,
   Protocol,
   Scenario,
+  WanId,
   WifiSsid,
 } from "../model";
 import { CONNECT_DBM, rssiAt } from "../floor";
 import { negotiatedWifiSecurity, wifiCredentialsMatch, wifiMode, wifiSupports6GHz } from "../wifi-security";
 import { inSubnet, ipToStr, isHostAddr, parseCidr, parseIp } from "./ip";
+import { EXTERNAL_TEST_IP, INTERNET_IP, WAN_IPS, WAN_NAMES, chooseWan, gatewayRoute, isPrivateIp, QOS_LABELS, wanBandwidth, wanSettings } from "./gateway";
+import { listensOn } from "./services";
 
 // ---------------------------------------------------------------------------
 // 基本ヘルパー
@@ -451,7 +454,7 @@ export function clientNetworkId(s: Scenario, c: Client): string | null {
 // ---------------------------------------------------------------------------
 
 /** 宛先。clientId があれば端末単位のポリシーにも一致させる */
-export type Dest = { kind: "network"; id: string; clientId?: string } | { kind: "internet" };
+export type Dest = { kind: "network"; id: string; clientId?: string } | { kind: "internet" | "vpn" };
 
 /** ポリシーの送信元/宛先: "any" / ネットワーク ID / "client:<端末 ID>" */
 export const CLIENT_REF = "client:";
@@ -567,9 +570,9 @@ export function evalFirewall(
     srcNetId,
     srcClientId: srcClientId ?? null,
     srcIp: endpoints ? endpoints.srcIp : srcClientId && s.clients.some((c) => c.id === srcClientId) ? resolveClient(s, srcClientId).ip ?? null : null,
-    dstZone: dst.kind === "internet" ? "external" : zoneOfNetwork(s, dst.id),
-    dstNetId: dst.kind === "internet" ? null : dst.id,
-    dstClientId: dst.kind === "internet" ? null : (dst.clientId ?? null),
+    dstZone: dst.kind === "network" ? zoneOfNetwork(s, dst.id) : dst.kind === "vpn" ? "vpn" : "external",
+    dstNetId: dst.kind === "network" ? dst.id : null,
+    dstClientId: dst.kind === "network" ? dst.clientId ?? null : null,
     dstIp: endpoints ? endpoints.dstIp : dst.kind === "network" && dst.clientId && s.clients.some((c) => c.id === dst.clientId) ? resolveClient(s, dst.clientId).ip ?? null : null,
     protocol,
     port,
@@ -588,9 +591,11 @@ export interface Hop {
 }
 
 export interface TraceQuery {
+  /** クライアント ID または外部テスト端末 "internet" */
   srcId: string;
-  /** client id または "internet" */
+  /** クライアント ID、"internet"、外部テスト端末からなら WAN ID */
   dst: string;
+  dstIp?: string;
   protocol: Protocol;
   port: number | null;
 }
@@ -621,7 +626,14 @@ export interface TraceResult {
   segments: Segment[];
   /** パケットが止められたノード */
   failAt: string | null;
+  route?: TraceRoute;
 }
+
+export type TraceRoute =
+  | { kind: "wan"; wan: WanId; targetIp: string }
+  | { kind: "vpn"; wan: WanId; targetIp: string; endpoint: string; name: string }
+  | { kind: "static"; targetIp: string; nextHopId: string }
+  | { kind: "forward"; wan: WanId; targetId?: string; targetIp?: string; targetPort?: number };
 
 function protoLabel(p: Protocol, port: number | null) {
   return p === "icmp" ? "ICMP (ping)" : `${p.toUpperCase()}${port !== null ? `/${port}` : ""}`;
@@ -633,7 +645,10 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   const devs = new Set<string>();
   const links = new Set<string>();
   const failLinks = new Set<string>();
-  const clientIds = [q.srcId];
+  const clientIds = q.srcId === "internet" ? [] : [q.srcId];
+  const gw = findGateway(s);
+  const gwId = gw?.id;
+  let route: TraceRoute | undefined;
   const addPath = (r: L2Result) => {
     r.deviceIds.forEach((d) => devs.add(d));
     r.linkIds.forEach((l) => links.add(l));
@@ -651,6 +666,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     failLinkIds: [...failLinks],
     segments: segs,
     failAt,
+    ...(route ? { route } : {}),
   });
   const tagInfo = (linkId: string, fromDev: string, netId: string) => {
     const l = s.links.find((x) => x.id === linkId);
@@ -688,9 +704,71 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     });
   };
 
-  const src = states?.get(q.srcId) ?? resolveClient(s, q.srcId);
+  const stateOf = (id: string) => states?.get(id) ?? resolveClient(s, id);
+  const hostAt = (ip: string) => {
+    const address = parseIp(ip);
+    if (address === null) return undefined;
+    for (const client of s.clients) {
+      const state = stateOf(client.id);
+      if (state.ip && parseIp(state.ip) === address) return state;
+    }
+    return undefined;
+  };
+  const wanSegment = (label: string, inbound = false) => {
+    if (gwId) segs.push({ edge: "wan", from: inbound ? "internet" : gwId, to: inbound ? gwId : "internet", label, vlan: null, medium: "wan" });
+  };
+  const stopAtGateway = (title: string, detail?: string) => {
+    failAt = gwId ?? null;
+    hops.push({ status: "fail", title, detail });
+    return done(false, title);
+  };
+
+  if (q.srcId === "internet") {
+    if (q.dst !== "wan1" && q.dst !== "wan2") return stopAtGateway("着信先の WAN を選んでください。");
+    const wan = q.dst;
+    const publicIp = WAN_IPS[wan];
+    route = { kind: "forward", wan };
+    if (!gwId || !wanSettings(s).links[wan].online) return stopAtGateway(`${WAN_NAMES[wan]} は接続されていません。`);
+    devs.add(gwId);
+    wanSegment(`${WAN_NAMES[wan]} → ゲートウェイ`, true);
+    hops.push({ status: "ok", title: `外部端末 ${EXTERNAL_TEST_IP} → ${WAN_NAMES[wan]} (${publicIp})` });
+    const forward = s.portForwards?.find((f) => f.enabled && f.wan === wan && f.protocol === q.protocol && f.publicPort === q.port);
+    if (!forward) return stopAtGateway("一致するポートフォワードがありません。", "WAN、プロトコル、公開ポートを確認してください。");
+    const target = hostAt(forward.targetIp);
+    route = { ...route, targetId: target?.client.id, targetIp: forward.targetIp, targetPort: forward.targetPort };
+    hops.push({ status: "ok", title: `DNAT「${forward.name}」`, detail: `${publicIp}:${q.port} → ${forward.targetIp}:${forward.targetPort}` });
+    if (!target || !target.network || !target.attachDeviceId || target.error) return stopAtGateway("転送先 IP を使う到達可能な端末が見つかりません。");
+    const flow: Flow = {
+      srcZone: "external", srcNetId: null, srcClientId: null, srcIp: EXTERNAL_TEST_IP,
+      dstZone: target.network.zoneId, dstNetId: target.network.id, dstClientId: target.client.id, dstIp: forward.targetIp,
+      protocol: q.protocol, port: forward.targetPort, state: "new",
+    };
+    const fw = evalFlow(s, flow);
+    if (fw.policy && !fw.allowed) return stopAtGateway(`Policy「${fw.policy.name}」で着信を拒否しました。`);
+    hops.push({ status: "ok", title: fw.policy ? `Policy「${fw.policy.name}」で着信を許可` : "ポートフォワードに一致する着信を許可" });
+    const path = l2Path(s, target.network.id, gwId, target.attachDeviceId);
+    clientIds.push(target.client.id);
+    addPath(path);
+    l2Segs(path, target.network.id);
+    if (!path.ok) return stopAtGateway("転送先への L2 経路がありません。", path.reason);
+    clientSeg(target, false);
+    if (!listensOn(target.client, q.protocol, forward.targetPort)) {
+      failAt = `c:${target.client.id}`;
+      hops.push({ status: "fail", title: `${target.client.name} の ${protoLabel(q.protocol, forward.targetPort)} は待ち受けていません` });
+      return done(false, "転送先ポートで接続を受け付けていません。");
+    }
+    const reply = evalFlow(s, {
+      srcZone: flow.dstZone, srcNetId: flow.dstNetId, srcClientId: flow.dstClientId, srcIp: flow.dstIp,
+      dstZone: flow.srcZone, dstNetId: null, dstClientId: null, dstIp: flow.srcIp,
+      protocol: flow.protocol, port: null, state: "established",
+    });
+    if (!reply.allowed) return stopAtGateway(`戻りの通信が Policy「${reply.policy?.name}」でブロックされました。`);
+    hops.push({ status: "ok", title: "応答は逆変換して同じ WAN から返送", detail: `送信元 ${forward.targetIp}:${forward.targetPort} → ${publicIp}:${q.port}` });
+    return done(true, `${WAN_NAMES[wan]} → ${target.client.name} (${protoLabel(q.protocol, forward.targetPort)}) に転送できました。`);
+  }
+
+  const src = stateOf(q.srcId);
   const proto = protoLabel(q.protocol, q.port);
-  const gwId = findGateway(s)?.id;
 
   // 1. 所属ネットワーク
   if (!src.network) {
@@ -725,7 +803,6 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   });
 
   const srcNet = src.network;
-  const gw = findGateway(s);
 
   const reachGateway = (st: ClientState, label: string): boolean => {
     const r = st.toGateway!;
@@ -794,9 +871,68 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     return true;
   };
 
-  // 3. インターネット宛
-  if (q.dst === "internet") {
+  // 3. IP アドレスで指定した端末、静的経路、VPN、WAN
+  const address = q.dst === "internet" ? q.dstIp ?? INTERNET_IP : undefined;
+  const sourceSubnet = q.dstIp ? parseCidr(srcNet.cidr) : null;
+  const addressNumber = address ? parseIp(address) : null;
+  const onLocalLink = sourceSubnet && addressNumber !== null && inSubnet(addressNumber, sourceSubnet);
+  const nextRoute = address ? gatewayRoute(s, address) : undefined;
+  const direct = (!nextRoute || onLocalLink) && q.dstIp && q.dst === "internet" ? hostAt(q.dstIp) : undefined;
+  const destination = direct?.client.id ?? q.dst;
+  if (destination === "internet") {
+    const targetIp = address ?? INTERNET_IP;
+    if (addressNumber === null) return done(false, "宛先 IPv4 アドレスが不正です。");
+    if (onLocalLink) {
+      failAt = `c:${src.client.id}`;
+      hops.push({ status: "fail", title: `${targetIp} の ARP 応答がありません` });
+      return done(false, "同じサブネットに宛先端末が見つかりません。");
+    }
     if (!reachGateway(src, "送信元")) return done(false, "ゲートウェイに到達できません。");
+
+    if (nextRoute?.kind === "static") {
+      const entry = nextRoute.route;
+      hops.push({ status: "info", title: `静的ルート「${entry.name}」に一致`, detail: `${entry.cidr} → ${entry.nextHop}（メトリック ${entry.metric}）` });
+      const next = hostAt(entry.nextHop);
+      if (!next?.network || !next.attachDeviceId || next.error || !gwId)
+        return stopAtGateway("静的ルートの次ホップに到達できません。", `次ホップ ${entry.nextHop} に接続済みの端末が必要です。`);
+      const net = next.network;
+      route = { kind: "static", targetIp, nextHopId: next.client.id };
+      if (net.id !== srcNet.id && (net.isolateNetwork || srcNet.isolateNetwork)) return stopAtGateway("ネットワークを分離 で遮断されました。");
+      if (!firewall({ kind: "network", id: net.id }, entry.cidr, targetIp)) {
+        failAt = gwId;
+        return done(false, "ファイアウォールで拒否されました。");
+      }
+      const path = l2Path(s, net.id, gwId, next.attachDeviceId);
+      addPath(path);
+      l2Segs(path, net.id);
+      if (!path.ok) return stopAtGateway("静的ルートの次ホップに到達できません。", path.reason);
+      clientIds.push(next.client.id);
+      clientSeg(next, false);
+      if (!returnTraffic({ zone: net.zoneId, netId: net.id, clientId: null, ip: targetIp, label: entry.cidr })) return done(false, "戻りの通信がブロックされました。");
+      hops.push({ status: "ok", title: `次ホップ ${entry.nextHop} へ転送`, detail: `${targetIp} は次ホップの先にある仮想宛先として応答します。NAT は行いません。` });
+      return done(true, `静的ルートで ${targetIp} に到達できます。`);
+    }
+
+    if (nextRoute?.kind === "vpn") {
+      const tunnel = nextRoute.tunnel;
+      const wan = chooseWan(s, `vpn:${tunnel.endpoint}`);
+      if (!wan) return stopAtGateway("VPN を運ぶ WAN 回線がありません。");
+      if (!tunnel.peerOnline) return stopAtGateway(`VPN「${tunnel.name}」の対向が応答しません。`);
+      if (!firewall({ kind: "vpn" }, tunnel.remoteCidr, targetIp)) {
+        failAt = gwId ?? null;
+        return done(false, "ファイアウォールで拒否されました。");
+      }
+      route = { kind: "vpn", wan, targetIp, endpoint: tunnel.endpoint, name: tunnel.name };
+      hops.push({ status: "ok", title: `VPN「${tunnel.name}」で仮想トンネル確立`, detail: `${tunnel.remoteCidr} 宛をカプセル化し、${WAN_NAMES[wan]} から対向 ${tunnel.endpoint} へ送ります。` });
+      wanSegment(`VPN · ${WAN_NAMES[wan]}`);
+      if (!returnTraffic({ zone: "vpn", netId: null, clientId: null, ip: targetIp, label: tunnel.remoteCidr })) return done(false, "戻りの通信がブロックされました。");
+      return done(true, `VPN 経由で ${targetIp} に到達できます。`);
+    }
+
+    if (isPrivateIp(addressNumber) || s.networks.some((n) => {
+      const subnet = parseCidr(n.cidr);
+      return subnet && inSubnet(addressNumber, subnet);
+    })) return stopAtGateway(`${targetIp} に到達する経路または端末がありません。`);
     if (!srcNet.internetAccess) {
       failAt = gwId ?? null;
       hops.push({
@@ -806,22 +942,28 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
       });
       return done(false, "インターネットアクセスが無効です。");
     }
-    if (!firewall({ kind: "internet" }, "インターネット")) {
+    if (!firewall({ kind: "internet" }, "インターネット", targetIp)) {
       failAt = gwId ?? null;
       return done(false, "ファイアウォールで拒否されました。");
     }
-    if (gwId) segs.push({ edge: "wan", from: gwId, to: "internet", label: "NAT → WAN", vlan: null, medium: "wan" });
-    if (!returnTraffic({ zone: "external", netId: null, clientId: null, ip: null, label: "インターネット" })) return done(false, "戻りの通信がブロックされました。");
-    hops.push({ status: "ok", title: "NAT して WAN からインターネットへ", detail: "送信元 IP はゲートウェイの WAN アドレスに変換されます。" });
+    const wan = chooseWan(s, `${q.srcId}:${targetIp}:${q.protocol}:${q.port}`);
+    if (!wan) return stopAtGateway("利用できる WAN 回線がありません。");
+    route = { kind: "wan", wan, targetIp };
+    wanSegment(`NAT → ${WAN_NAMES[wan]}`);
+    if (!returnTraffic({ zone: "external", netId: null, clientId: null, ip: targetIp, label: "インターネット" })) return done(false, "戻りの通信がブロックされました。");
+    hops.push({ status: "ok", title: `NAT して ${WAN_NAMES[wan]} からインターネットへ`, detail: `送信元 IP を ${WAN_IPS[wan]} に変換します。` });
+    const qos = wanBandwidth(s, wan, q.srcId);
+    if (qos.backgroundFlows || s.qos?.some((rule) => rule.clientId === q.srcId))
+      hops.push({ status: "info", title: `QoS · 優先度 ${QOS_LABELS[qos.priority]}`, detail: `WAN の推定配分 下り ${Math.round(qos.downloadMbps)} / 上り ${Math.round(qos.uploadMbps)} Mbps（競合フロー ${qos.backgroundFlows}）` });
     return done(true, `${src.client.name} → インターネット (${proto}) は到達できます。`);
   }
 
   // 4. クライアント宛
-  if (q.dst === q.srcId) {
+  if (destination === q.srcId) {
     hops.push({ status: "info", title: "送信元と宛先が同じです" });
     return done(true, "自分自身です。");
   }
-  const dst = states?.get(q.dst) ?? resolveClient(s, q.dst);
+  const dst = stateOf(destination);
   clientIds.push(dst.client.id);
   if (!dst.network || !dst.ip || dst.error) {
     failAt = `c:${dst.client.id}`;

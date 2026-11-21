@@ -248,7 +248,7 @@ function PolicyPanel({ id, preset, onClose }: { id: string; preset: { src: strin
         <div className="mb-2 text-[12px] font-medium">送信元</div>
         <div className="grid grid-cols-2 gap-2">
           <Field label="ゾーン">
-            <Select aria-label="送信元ゾーン" value={draft.srcZone} onChange={(v) => update((p) => ((p.srcZone = v), (p.src = "any")))} options={zoneOpts(["external"])} />
+            <Select aria-label="送信元ゾーン" value={draft.srcZone} onChange={(v) => update((p) => ((p.srcZone = v), (p.src = "any")))} options={zoneOpts([])} />
           </Field>
           <Field label="ネットワーク / 端末 / グループ">
             <Select aria-label="送信元の対象" value={draft.src} onChange={(v) => update((p) => (p.src = v))} options={netOpts(draft.srcZone)} />

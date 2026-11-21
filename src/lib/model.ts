@@ -189,6 +189,58 @@ export function isIPhone(client: Pick<Client, "id" | "name">) {
   return client.id === "iphone" || /\biphone\b/i.test(client.name);
 }
 
+export type WanId = "wan1" | "wan2";
+
+export interface WanLink {
+  online: boolean;
+  downloadMbps: number;
+  uploadMbps: number;
+  backgroundFlows: number;
+}
+
+export interface WanSettings {
+  mode: "failover" | "balance";
+  links: Record<WanId, WanLink>;
+}
+
+export interface PortForward {
+  id: string;
+  name: string;
+  wan: WanId;
+  protocol: "tcp" | "udp";
+  publicPort: number;
+  targetIp: string;
+  targetPort: number;
+  enabled: boolean;
+}
+
+export interface VpnTunnel {
+  id: string;
+  name: string;
+  remoteCidr: string;
+  endpoint: string;
+  enabled: boolean;
+  peerOnline: boolean;
+}
+
+export interface StaticRoute {
+  id: string;
+  name: string;
+  cidr: string;
+  nextHop: string;
+  metric: number;
+  enabled: boolean;
+}
+
+export type QosPriority = "high" | "normal" | "low";
+
+export interface QosRule {
+  clientId: string;
+  priority: QosPriority;
+  downloadLimit?: number;
+  uploadLimit?: number;
+}
+
 export interface Scenario {
   networks: Network[];
   zones: Zone[];
@@ -205,6 +257,11 @@ export interface Scenario {
   objects?: PolicyObject[];
   /** シミュレーション上の現在時刻（スケジュール付きポリシーの判定に使う） */
   clock?: { day: number; time: string };
+  wan?: WanSettings;
+  portForwards?: PortForward[];
+  vpnTunnels?: VpnTunnel[];
+  staticRoutes?: StaticRoute[];
+  qos?: QosRule[];
 }
 
 export const BUILTIN_ZONES: Zone[] = [

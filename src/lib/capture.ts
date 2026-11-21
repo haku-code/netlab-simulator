@@ -1,11 +1,11 @@
 // Trace 結果から、区間ごとのフレーム（Wireshark 風のキャプチャ）を組み立てる
-import { WAN_IP } from "./emu";
+import { EXTERNAL_TEST_IP, INTERNET_IP, WAN_IPS } from "./net/gateway";
 import type { Protocol, Scenario } from "./model";
 import { findGateway, resolveClient, type TraceQuery, type TraceResult } from "./net/simulate";
 import { clientWifiMode } from "./wifi-security";
 
 export const BROADCAST = "ff:ff:ff:ff:ff:ff";
-export const INTERNET_IP = "93.184.216.34";
+export { INTERNET_IP } from "./net/gateway";
 const ISP_MAC = "00:00:5e:00:01:01";
 
 export interface Frame {
@@ -49,17 +49,19 @@ export function nodeName(s: Scenario, id: string) {
 }
 
 export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[] {
+  if (q.srcId === "internet") return buildInboundCapture(s, q, r);
   const src = resolveClient(s, q.srcId);
   if (!src.ip || !src.network || src.error) return [];
   const gw = findGateway(s);
   const gwId = gw?.id;
-  const internet = q.dst === "internet";
-  const dst = internet ? null : resolveClient(s, q.dst);
+  const route = r.route;
+  const dstId = route?.kind === "static" ? route.nextHopId : q.dst !== "internet" ? q.dst : !route ? r.clientIds[1] : undefined;
+  const dst = dstId ? resolveClient(s, dstId) : null;
   const srcWifi = clientWifiMode(s, src.client);
   const dstWifi = dst ? clientWifiMode(s, dst.client) : undefined;
-  const dstIp = internet ? INTERNET_IP : dst?.ip;
+  const dstIp = route && route.kind !== "forward" ? route.targetIp : q.dstIp ?? (q.dst === "internet" ? INTERNET_IP : dst?.ip);
   if (!dstIp) return [];
-  const sameNet = !internet && dst?.network?.id === src.network.id;
+  const sameNet = route?.kind !== "static" && dst?.network?.id === src.network.id;
   const proto: Frame["protocol"] = q.protocol === "icmp" ? "ICMP" : q.protocol === "tcp" ? "TCP" : "UDP";
   const sport = q.protocol === "icmp" ? undefined : ephemeralPort(q.srcId + q.dst);
   const dport = q.protocol === "icmp" ? undefined : (q.port ?? undefined);
@@ -155,6 +157,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
   if (secondLeg.length) {
     const toWan = secondLeg[0].medium === "wan";
     if (!toWan && dst) {
+      const address = dst.ip ?? dstIp;
       const dstVlan = secondLeg.find((x) => x.vlan !== null)?.vlan ?? null;
       push({
         kind: "arp-request",
@@ -165,8 +168,8 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
         ethDst: BROADCAST,
         vlan: dstVlan,
         protocol: "ARP",
-        info: `${dstIp} の MAC アドレスを ${dst.network!.gatewayIp} に通知してください`,
-        note: "ルーターも、宛先ネットワーク側で宛先の MAC アドレスを ARP で調べます。",
+        info: `${address} の MAC アドレスを ${dst.network!.gatewayIp} に通知してください`,
+        note: route?.kind === "static" ? "静的ルートの次ホップの MAC アドレスを ARP で調べます。" : "ルーターも、宛先ネットワーク側で宛先の MAC アドレスを ARP で調べます。",
       });
       push({
         kind: "arp-reply",
@@ -177,28 +180,31 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
         ethDst: gwMac(s),
         vlan: dstVlan,
         protocol: "ARP",
-        info: `${dstIp} の MAC アドレスは ${dst.client.mac}`,
+        info: `${address} の MAC アドレスは ${dst.client.mac}`,
       });
     }
     for (const seg of secondLeg) {
+      const wan = seg.medium === "wan";
+      const tunnel = wan && route?.kind === "vpn" ? route : undefined;
       push({
         kind: "data",
         from: nodeName(s, seg.from),
         to: nodeName(s, seg.to),
         medium: seg.medium,
         wifi: seg.medium === "wifi" ? dstWifi : undefined,
-        ethSrc: seg.medium === "wan" ? wanMac(gwMac(s)) : gwMac(s),
-        ethDst: seg.medium === "wan" ? ISP_MAC : dst!.client.mac,
+        ethSrc: wan ? wanMac(gwMac(s)) : gwMac(s),
+        ethDst: wan ? ISP_MAC : dst!.client.mac,
         vlan: seg.vlan,
-        ipSrc: seg.medium === "wan" ? WAN_IP : src.ip,
-        ipDst: dstIp,
-        ttl: 63,
-        protocol: proto,
+        ipSrc: wan && (route?.kind === "wan" || route?.kind === "vpn") ? WAN_IPS[route.wan] : src.ip,
+        ipDst: tunnel?.endpoint ?? dstIp,
+        ttl: tunnel ? 64 : 63,
+        protocol: tunnel ? "UDP" : proto,
         srcPort: sport,
-        dstPort: dport,
-        info: info(q.protocol),
+        dstPort: tunnel ? 51820 : dport,
+        info: tunnel ? `WireGuard · ${tunnel.name}` : info(q.protocol),
         note:
-          seg.medium === "wan"
+          tunnel ? `カプセル化: 内側の ${src.ip} → ${dstIp} を仮想 WireGuard データとして運びます。`
+          : wan
             ? "NAT: 送信元 IP がゲートウェイの WAN アドレスに書き換えられます。"
             : seg === secondLeg[0]
               ? "ルーターを通過: 送信元/宛先 MAC が書き換わり、TTL が 1 減ります。IP アドレスはそのままです。"
@@ -207,7 +213,35 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       });
     }
   } else if (!r.ok && r.failAt === gwId && frames.at(-1)?.kind === "data") {
-    frames.at(-1)!.dropped = "ゲートウェイで破棄されました（ファイアウォール、ネットワーク分離、インターネット接続の設定を確認してください）。";
+    frames.at(-1)!.dropped = `ゲートウェイで破棄されました。 ${r.summary}`;
   }
   return frames;
+}
+
+function buildInboundCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[] {
+  const route = r.route;
+  if (route?.kind !== "forward") return [];
+  const target = route.targetId ? s.clients.find((c) => c.id === route.targetId) : undefined;
+  const publicIp = WAN_IPS[route.wan];
+  return r.segments.map((seg, i) => {
+    const wan = seg.medium === "wan";
+    const dstPort = wan ? q.port ?? undefined : route.targetPort;
+    return {
+      no: i + 1, kind: "data",
+      from: nodeName(s, seg.from), to: nodeName(s, seg.to), medium: seg.medium, vlan: seg.vlan,
+      wifi: !wan && target && seg.medium === "wifi" ? clientWifiMode(s, target) : undefined,
+      ethSrc: wan ? ISP_MAC : gwMac(s),
+      ethDst: wan ? wanMac(gwMac(s)) : target?.mac ?? "—",
+      ipSrc: EXTERNAL_TEST_IP,
+      ipDst: wan ? publicIp : route.targetIp,
+      ttl: wan ? 64 : 63,
+      protocol: q.protocol === "tcp" ? "TCP" : q.protocol === "udp" ? "UDP" : "ICMP",
+      srcPort: q.protocol === "icmp" ? undefined : ephemeralPort(EXTERNAL_TEST_IP + q.dst),
+      dstPort,
+      info: q.protocol === "icmp" ? "エコー要求 (ping)" : q.protocol === "tcp" ? `着信 TCP/${dstPort} [SYN]` : `着信 UDP/${dstPort}`,
+      changed: i === 1 ? ["ethSrc", "ethDst", "ipDst", "ttl", ...(q.port !== dstPort ? ["dstPort" as const] : [])] : [],
+      note: i === 1 ? `DNAT: ${publicIp}:${q.port} → ${route.targetIp}:${route.targetPort}` : undefined,
+      dropped: seg.fail || (!r.ok && r.segments.length === 1) ? r.summary : undefined,
+    };
+  });
 }

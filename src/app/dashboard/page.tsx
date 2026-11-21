@@ -9,6 +9,7 @@ import { TopologyView } from "@/components/topology/TopologyView";
 import { Card, IssueList, table as t } from "@/components/ui";
 import { useClientStates, useIssues } from "@/lib/hooks";
 import { broadcasts, clientNetworkId, findNetwork, uplinkOf, zoneName } from "@/lib/net/simulate";
+import { WAN_IDS, WAN_LATENCY_MS, WAN_NAMES, wanSettings } from "@/lib/net/gateway";
 import { useScenario } from "@/lib/store";
 
 /** 見た目用の擬似データ（学習判定には使わない） */
@@ -40,6 +41,11 @@ export default function DashboardPage() {
   const s = useScenario();
   const issues = useIssues();
   const states = useClientStates();
+  const wan = wanSettings(s);
+  const liveWan = WAN_IDS.filter((id) => wan.links[id].online);
+  const activeWan = wan.mode === "failover" ? liveWan.slice(0, 1) : liveWan;
+  const latency = activeWan.map((id) => WAN_LATENCY_MS[id]).join("–");
+  const capacity = (direction: "downloadMbps" | "uploadMbps") => activeWan.reduce((sum, id) => sum + wan.links[id][direction], 0);
   const online = [...states.values()].filter((x) => !x.error);
   const wired = online.filter((x) => x.client.connection.type === "wired").length;
   const devOnline = s.devices.filter((d) => uplinkOf(s, d.id).online).length;
@@ -60,15 +66,15 @@ export default function DashboardPage() {
         <Card className="p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <span className="font-semibold">インターネット</span>
-            <span className="inline-flex items-center gap-1.5 text-[12px] text-ok">
-              <span className="size-2 rounded-full bg-ok" /> 良好
+            <span className={clsx("inline-flex items-center gap-1.5 text-[12px]", activeWan.length ? "text-ok" : "text-err")}>
+              <span className="size-2 rounded-full bg-current" /> {activeWan.length ? "接続済み" : "WAN 停止中"}
             </span>
           </div>
           <div className="grid grid-cols-4 gap-4">
-            <Stat label="ISP" value={<span className="text-[14px]">NetLab ISP</span>} sub="WAN1" />
-            <Stat label="遅延" value="8 ms" />
-            <Stat label="下り" value={`${traffic[traffic.length - 1].down}`} sub="Mbps" />
-            <Stat label="上り" value={`${traffic[traffic.length - 1].up}`} sub="Mbps" />
+            <Stat label="使用中の回線" value={<span className="text-[14px]">{activeWan.map((id) => WAN_NAMES[id]).join(" / ") || "—"}</span>} sub={wan.mode === "failover" ? "フェイルオーバー" : "ロードバランス"} />
+            <Stat label="基準遅延" value={latency ? `${latency} ms` : "—"} />
+            <Stat label="下り容量" value={capacity("downloadMbps")} sub="Mbps" />
+            <Stat label="上り容量" value={capacity("uploadMbps")} sub="Mbps" />
           </div>
         </Card>
         <Card className="p-4">

@@ -1,43 +1,27 @@
 // 端末エミュレーター用のネットワーク操作（ブラウザ・ping・traceroute）
-import { DEFAULT_DHCP_LEASE_TIME, type Client, type ClientKind, type Port, type Protocol, type Scenario } from "./model";
+import { DEFAULT_DHCP_LEASE_TIME, type Client, type Port, type Protocol, type QosPriority, type Scenario, type WanId } from "./model";
 import { inSubnet, parseCidr, parseIp } from "./net/ip";
-import { findNetwork, findPort, radioLink, resolveClient, trace, type ClientState, type Hop } from "./net/simulate";
+import { findNetwork, findPort, radioLink, resolveClient, trace, type ClientState, type Hop, type TraceRoute } from "./net/simulate";
+import { gatewayRoute, INTERNET_IP, isPrivateIp, wanBandwidth, WAN_IPS, WAN_LATENCY_MS } from "./net/gateway";
+import { listensOn } from "./net/services";
 
-/** 各種端末が待ち受けているポート（サービス） */
-export const LISTEN: Record<ClientKind, number[]> = {
-  pc: [],
-  phone: [],
-  tv: [7000, 8008, 8009],
-  iot: [80, 554],
-  server: [53, 80, 443, 445, 5000, 8123],
-  printer: [80, 443, 631, 9100],
-};
-
-function listensOn(client: Client, protocol: Protocol, port: number) {
-  if (client.kind === "server" && client.webService) {
-    return protocol === "tcp" && (port === 80 || (port === 443 && client.webService.tls !== "disabled"));
-  }
-  return LISTEN[client.kind].includes(port);
-}
-
-export const WAN_IP = "203.0.113.24";
+export { LISTEN } from "./net/services";
+export const WAN_IP = WAN_IPS.wan1;
 
 export type Target =
   | { kind: "client"; client: Client; ip: string }
   | { kind: "gateway"; ip: string; networkId: string }
-  | { kind: "internet"; host: string }
+  | { kind: "internet"; host: string; ip: string }
+  | { kind: "routed"; ip: string }
   | { kind: "unknown"; ip: string }
   | { kind: "unresolved"; host: string };
-
-const isPrivate = (n: number) =>
-  (n >>> 24 === 10) || (n >>> 20 === (172 << 4) + 1) || (n >>> 16 === (192 << 8) + 168);
 
 /** ホスト名 / IP を宛先に解決する（DNS はゲートウェイが応答する想定） */
 export function resolveTarget(s: Scenario, host: string): Target {
   const ipNum = parseIp(host);
   if (ipNum === null) {
     const server = s.clients.find((c) => c.kind === "server" && c.webService?.host === host.toLowerCase());
-    if (!server) return { kind: "internet", host };
+    if (!server) return { kind: "internet", host, ip: INTERNET_IP };
     const state = resolveClient(s, server.id);
     return state.ip && !state.error ? { kind: "client", client: server, ip: state.ip } : { kind: "unresolved", host };
   }
@@ -46,12 +30,13 @@ export function resolveTarget(s: Scenario, host: string): Target {
     const st = resolveClient(s, c.id);
     if (st.ip === host && !st.error) return { kind: "client", client: c, ip: host };
   }
-  if (isPrivate(ipNum)) return { kind: "unknown", ip: host };
-  return { kind: "internet", host };
+  if (gatewayRoute(s, host)) return { kind: "routed", ip: host };
+  if (isPrivateIp(ipNum)) return { kind: "unknown", ip: host };
+  return { kind: "internet", host, ip: host };
 }
 
 export type ProbeResult =
-  | { status: "ok"; hops: Hop[]; routed: boolean; target: Exclude<Target, { kind: "unresolved" }> }
+  | { status: "ok"; hops: Hop[]; routed: boolean; target: Exclude<Target, { kind: "unresolved" }>; route?: TraceRoute }
   | { status: "refused"; hops: Hop[]; routed: boolean; target: Exclude<Target, { kind: "unresolved" }> }
   | { status: "timeout"; hops: Hop[]; summary: string; target: Exclude<Target, { kind: "unresolved" }> }
   | { status: "noip"; message: string }
@@ -86,12 +71,14 @@ export function probe(s: Scenario, srcId: string, host: string, protocol: Protoc
     const hops: Hop[] = [{ status: "ok", title: `ゲートウェイ ${target.ip} に到達` }];
     return { status: listens ? "ok" : "refused", target, hops, routed: target.networkId !== src.network.id };
   }
-  const r = trace(s, { srcId, dst: target.kind === "internet" ? "internet" : target.client.id, protocol, port });
+  const r = trace(s, target.kind === "client"
+    ? { srcId, dst: target.client.id, protocol, port }
+    : { srcId, dst: "internet", dstIp: target.ip, protocol, port });
   if (!r.ok) return { status: "timeout", target, summary: r.summary, hops: r.hops };
-  const routed = target.kind === "internet" || resolveClient(s, target.client.id).network?.id !== src.network.id;
+  const routed = target.kind !== "client" || resolveClient(s, target.client.id).network?.id !== src.network.id;
   if (target.kind === "client" && protocol !== "icmp" && port !== null && !listensOn(target.client, protocol, port))
     return { status: "refused", target, hops: r.hops, routed };
-  return { status: "ok", target, hops: r.hops, routed };
+  return { status: "ok", target, hops: r.hops, routed, ...(r.route ? { route: r.route } : {}) };
 }
 
 /** 端末が使う DNS サーバー（DHCP で配られたもの。手動設定の端末はゲートウェイ） */
@@ -116,7 +103,7 @@ export function dnsReachable(s: Scenario, srcId: string): string | null {
     return null;
   }
   if (target.kind === "unknown") return `DNS サーバー ${dns} が見つかりません。`;
-  const r = trace(s, { srcId, dst: "internet", protocol: "udp", port: 53 });
+  const r = trace(s, { srcId, dst: "internet", dstIp: dns, protocol: "udp", port: 53 });
   return r.ok ? null : `外部の DNS サーバー ${dns} に届きません: ${r.summary}`;
 }
 
@@ -132,7 +119,7 @@ export function pingLines(s: Scenario, srcId: string, host: string, count = 4): 
   const p = probe(s, srcId, host, "icmp", null);
   if (p.status === "noip") return [`ping: ${host}: ネットワークに到達できません`, p.message];
   if (p.status === "dns") return [`ping: ${host}: 名前を解決できません`, p.message];
-  const shown = p.target.kind === "client" ? p.target.ip : p.target.kind === "internet" ? "93.184.216.34" : p.target.ip;
+  const shown = p.target.ip;
   const out = [`PING ${host}${host !== shown ? ` (${shown})` : ""}: 56 data bytes`];
   if (p.status === "timeout") {
     for (let i = 0; i < count; i++) out.push(`Request timeout for icmp_seq ${i}`);
@@ -159,7 +146,7 @@ export function tracerouteLines(s: Scenario, srcId: string, host: string): strin
   const p = probe(s, srcId, host, "icmp", null);
   if (p.status === "noip") return [`traceroute: ${host}: ネットワークに到達できません`, p.message];
   if (p.status === "dns") return [`traceroute: ${host}: 名前を解決できません`, p.message];
-  const dstIp = p.target.kind === "client" ? p.target.ip : p.target.kind === "internet" ? "93.184.216.34" : p.target.ip;
+  const dstIp = p.target.ip;
   const out = [`traceroute to ${host} (${dstIp}), 30 hops max, 60 byte packets`];
   const r = rnd(`tr${srcId}${host}`);
   const ms = (base: number) => [0, 1, 2].map(() => `${(base + r() * base * 0.4).toFixed(3)} ms`).join("  ");
@@ -173,8 +160,13 @@ export function tracerouteLines(s: Scenario, srcId: string, host: string): strin
     for (let i = 0; i < 3; i++) out.push(` ${n++}  * * *`);
     return out;
   }
-  if (p.target.kind === "internet") {
-    out.push(` 1  ${gw}  ${ms(0.5)}`, ` 2  ${WAN_IP.replace(/\d+$/, "1")}  ${ms(3)}`, ` 3  198.51.100.9  ${ms(6)}`, ` 4  ${dstIp}  ${ms(9)}`);
+  if (p.status === "ok" && p.route?.kind === "wan") {
+    const isp = WAN_IPS[p.route.wan].replace(/\d+$/, "1");
+    out.push(` 1  ${gw}  ${ms(0.5)}`, ` 2  ${isp}  ${ms(3)}`, ` 3  198.51.100.9  ${ms(6)}`, ` 4  ${dstIp}  ${ms(9)}`);
+    return out;
+  }
+  if (p.status === "ok" && p.route?.kind === "static") {
+    out.push(` 1  ${gw}  ${ms(0.5)}`, ` 2  ${resolveClient(s, p.route.nextHopId).ip}  ${ms(0.8)}`, ` 3  ${dstIp}  ${ms(1)}`);
     return out;
   }
   if (p.routed) out.push(` 1  ${gw}  ${ms(0.5)}`, ` 2  ${dstIp}  ${ms(0.8)}`);
@@ -226,11 +218,8 @@ export function netInfo(s: Scenario, clientId: string): NetInfo {
 }
 
 export type SpeedTestResult =
-  | { ok: true; downloadMbps: number; uploadMbps: number; latencyMs: number }
+  | { ok: true; downloadMbps: number; uploadMbps: number; latencyMs: number; wan: WanId; priority: QosPriority; backgroundFlows: number }
   | { ok: false; reason: string };
-
-// NetLab の仮想 ISP 回線。実測用の外部通信は行わない。
-const SPEED_TEST_WAN = { downloadMbps: 500, uploadMbps: 100, latencyMs: 8 };
 
 function portMbps(port: Port | undefined) {
   const speed = port?.speed.match(/^(\d+(?:\.\d+)?)\s*([GM])(?:bE|bps)$/i);
@@ -245,6 +234,10 @@ export function speedTest(s: Scenario, clientId: string): SpeedTestResult {
   if (!route.ok) {
     return { ok: false, reason: route.hops.findLast((hop) => hop.status === "fail")?.detail ?? route.summary };
   }
+  if (route.route?.kind !== "wan" && route.route?.kind !== "vpn")
+    return { ok: false, reason: "測定先への経路が仮想 WAN 回線を通っていません。" };
+  const { wan } = route.route;
+  const bandwidth = wanBandwidth(s, wan, clientId);
 
   const connection = st.client.connection;
   const accessMbps = connection.type === "wired" && connection.deviceId && connection.portId
@@ -260,9 +253,12 @@ export function speedTest(s: Scenario, clientId: string): SpeedTestResult {
   const upload = Math.min(wiredMbps, wifi ? wifi.rate * 0.55 : Infinity);
   return {
     ok: true,
-    downloadMbps: Math.min(SPEED_TEST_WAN.downloadMbps, Math.round(download)),
-    uploadMbps: Math.min(SPEED_TEST_WAN.uploadMbps, Math.round(upload)),
-    latencyMs: SPEED_TEST_WAN.latencyMs + uplinks.length + (wifi ? 2 + Math.round(Math.max(0, -55 - wifi.rssi) * 0.75) : 0),
+    downloadMbps: Math.round(Math.min(bandwidth.downloadMbps, download)),
+    uploadMbps: Math.round(Math.min(bandwidth.uploadMbps, upload)),
+    latencyMs: WAN_LATENCY_MS[wan] + bandwidth.queueDelayMs + uplinks.length + (wifi ? 2 + Math.round(Math.max(0, -55 - wifi.rssi) * 0.75) : 0),
+    wan,
+    priority: bandwidth.priority,
+    backgroundFlows: bandwidth.backgroundFlows,
   };
 }
 

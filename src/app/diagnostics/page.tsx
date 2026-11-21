@@ -6,8 +6,10 @@ import { TopologyView } from "@/components/topology/TopologyView";
 import { TraceView } from "@/components/TraceView";
 import { Button, Card, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
 import type { Protocol } from "@/lib/model";
-import { buildCapture } from "@/lib/capture";
-import { trace } from "@/lib/net/simulate";
+import { buildCapture, nodeName } from "@/lib/capture";
+import { trace, type TraceQuery } from "@/lib/net/simulate";
+import { WAN_IDS, WAN_IPS, WAN_NAMES } from "@/lib/net/gateway";
+import { parseIp } from "@/lib/net/ip";
 import { CaptureView } from "@/components/theory/CaptureView";
 import { useScenario } from "@/lib/store";
 import { probe } from "@/lib/emu";
@@ -23,17 +25,25 @@ export default function DiagnosticsPage() {
   const [selectedDst, setDst] = useState("internet");
   const [protocol, setProtocol] = useState<Protocol>("icmp");
   const [port, setPort] = useState("443");
-  const [ran, setRan] = useState<{ srcId: string; dst: string } | null>(null);
-  const portNum = protocol === "icmp" ? null : Number(port) || null;
+  const [destinationIp, setDestinationIp] = useState("");
+  const [ran, setRan] = useState<Pick<TraceQuery, "srcId" | "dst" | "dstIp"> | null>(null);
+  const parsedPort = Number(port);
+  const validPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : null;
+  const portNum = protocol === "icmp" ? null : validPort;
 
   const clientOpts = s.clients.map((c) => ({ value: c.id, label: c.name }));
-  const src = s.clients.find((c) => c.id === selectedSrc)?.id ?? s.clients[0]?.id ?? "";
-  const dst = s.clients.some((c) => c.id === selectedDst && c.id !== src) ? selectedDst : "internet";
-  const nodeName = (id: string) =>
-    id === "internet" ? "インターネット" : id.startsWith("c:") ? (s.clients.find((c) => c.id === id.slice(2))?.name ?? "?") : (s.devices.find((d) => d.id === id)?.name ?? "?");
-  const run = () => setRan({ srcId: src, dst });
+  const src = selectedSrc === "internet" ? selectedSrc : s.clients.find((c) => c.id === selectedSrc)?.id ?? s.clients[0]?.id ?? "internet";
+  const inbound = src === "internet";
+  const dstOpts = inbound
+    ? WAN_IDS.map((id) => ({ value: id, label: `${WAN_NAMES[id]} · ${WAN_IPS[id]}` }))
+    : [{ value: "internet", label: "インターネット" }, { value: "ip", label: "IPv4 アドレスを指定" }, ...clientOpts.filter((o) => o.value !== src)];
+  const dst = dstOpts.some((o) => o.value === selectedDst) ? selectedDst : inbound ? "wan1" : "internet";
+  const activeProtocol = inbound && protocol === "icmp" ? "tcp" : protocol;
+  const invalidIp = dst === "ip" && parseIp(destinationIp) === null;
+  const run = () => setRan(dst === "ip" ? { srcId: src, dst: "internet", dstIp: destinationIp.trim() } : { srcId: src, dst });
   const changeSource = (id: string) => {
     if (id === dst) setDst("internet");
+    if (id === "internet" && protocol === "icmp") setProtocol("tcp");
     setSrc(id);
   };
   const pickPair = useCallback((srcId: string, destination: string) => {
@@ -43,12 +53,14 @@ export default function DiagnosticsPage() {
   }, []);
 
   // 設定が変わったら結果を再計算する
-  const result = useMemo(() => {
+  const query = useMemo<TraceQuery | null>(() => {
     if (!ran) return null;
+    if (ran.srcId === "internet") return { ...ran, protocol: protocol === "icmp" ? "tcp" : protocol, port: validPort };
     if (!s.clients.some((c) => c.id === ran.srcId) || (ran.dst !== "internet" && !s.clients.some((c) => c.id === ran.dst))) return null;
-    return trace(s, { ...ran, protocol, port: portNum }, states);
-  }, [s, ran, protocol, portNum, states]);
-  const webService = protocol === "tcp" && (portNum === 80 || portNum === 443)
+    return { ...ran, protocol, port: portNum };
+  }, [s.clients, ran, protocol, portNum, validPort]);
+  const result = useMemo(() => query ? trace(s, query, states) : null, [s, query, states]);
+  const webService = ran?.srcId !== "internet" && protocol === "tcp" && (portNum === 80 || portNum === 443)
     ? s.clients.find((c) => c.id === ran?.dst && c.kind === "server")?.webService
     : undefined;
 
@@ -59,28 +71,31 @@ export default function DiagnosticsPage() {
         <div className="space-y-4">
           <Card className="space-y-3 p-4">
             <Field label="送信元">
-              <Select aria-label="トレースの送信元" value={src} onChange={changeSource} options={clientOpts} disabled={!src} />
+              <Select aria-label="トレースの送信元" value={src} onChange={changeSource} options={[...clientOpts, { value: "internet", label: "外部テスト端末（WAN から着信）" }]} />
             </Field>
             <Field label="宛先">
-              <Select aria-label="トレースの宛先" value={dst} onChange={setDst} options={[{ value: "internet", label: "インターネット" }, ...clientOpts.filter((o) => o.value !== src)]} />
+              <Select aria-label="トレースの宛先" value={dst} onChange={setDst} options={dstOpts} />
             </Field>
+            {dst === "ip" && <Field label="宛先 IPv4" hint="静的ルートや VPN の対向ネットワーク内の IP を指定します。">
+              <Input aria-label="宛先 IPv4" value={destinationIp} placeholder="10.20.0.10" onChange={(e) => setDestinationIp(e.target.value)} />
+            </Field>}
             <Field label="プロトコル">
               <Segmented<Protocol>
-                value={protocol}
+                value={activeProtocol}
                 onChange={setProtocol}
                 options={[
-                  { value: "icmp", label: "ICMP" },
+                  ...(!inbound ? [{ value: "icmp" as const, label: "ICMP" }] : []),
                   { value: "tcp", label: "TCP" },
                   { value: "udp", label: "UDP" },
                 ]}
               />
             </Field>
-            {protocol !== "icmp" && (
-              <Field label="宛先ポート">
-                <Input aria-label="トレースの宛先ポート" type="number" className="tnum" value={port} onChange={(e) => setPort(e.target.value)} />
+            {activeProtocol !== "icmp" && (
+              <Field label="宛先ポート" hint={inbound ? "ポートフォワードの公開ポートを指定します。" : undefined}>
+                <Input aria-label="トレースの宛先ポート" type="number" min={1} max={65535} className="tnum" value={port} onChange={(e) => setPort(e.target.value)} />
               </Field>
             )}
-            <Button variant="primary" className="w-full" onClick={run} disabled={!src}>
+            <Button variant="primary" className="w-full" onClick={run} disabled={invalidIp || (inbound && validPort === null)}>
               トレースを実行
             </Button>
           </Card>
@@ -107,17 +122,17 @@ export default function DiagnosticsPage() {
                   <li key={i} className="flex items-center gap-1">
                     {i > 0 && <span className="text-faint">→</span>}
                     <span className={clsx("rounded border px-1.5 py-px", seg.fail ? "border-err/50 text-err" : "border-line text-fg-2")}>
-                      <span className="tnum text-muted">{i + 1}.</span> {nodeName(seg.to)} <span className="text-muted">({seg.label})</span>
+                    <span className="tnum text-muted">{i + 1}.</span> {nodeName(s, seg.to)} <span className="text-muted">({seg.label})</span>
                     </span>
                   </li>
                 ))}
               </ol>
             )}
           </Card>
-          {result && ran && (
+          {result && query && result.segments.length > 0 && (
             <Card title="パケットキャプチャ" action={<span className="text-[12px] text-muted">各区間のヘッダー · 黄色は前のフレームから変わった値</span>}>
               <div className="px-4 pb-4">
-                <CaptureView frames={buildCapture(s, { ...ran, protocol, port: portNum }, result)} wirelessTools />
+                <CaptureView frames={buildCapture(s, query, result)} wirelessTools />
               </div>
             </Card>
           )}
