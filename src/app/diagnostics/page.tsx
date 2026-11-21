@@ -10,6 +10,8 @@ import { buildCapture, nodeName } from "@/lib/capture";
 import { trace, type TraceQuery } from "@/lib/net/simulate";
 import { WAN_IDS, WAN_IPS, WAN_NAMES } from "@/lib/net/gateway";
 import { parseIp } from "@/lib/net/ip";
+import { parseIpv6, type IpFamily } from "@/lib/net/ipv6";
+import { useSecurityLog } from "@/lib/security-log";
 import { CaptureView } from "@/components/theory/CaptureView";
 import { useScenario } from "@/lib/store";
 import { probe } from "@/lib/emu";
@@ -26,7 +28,8 @@ export default function DiagnosticsPage() {
   const [protocol, setProtocol] = useState<Protocol>("icmp");
   const [port, setPort] = useState("443");
   const [destinationIp, setDestinationIp] = useState("");
-  const [ran, setRan] = useState<Pick<TraceQuery, "srcId" | "dst" | "dstIp"> | null>(null);
+  const [family, setFamily] = useState<IpFamily>("ipv4");
+  const [ran, setRan] = useState<Pick<TraceQuery, "srcId" | "dst" | "dstIp" | "family"> | null>(null);
   const parsedPort = Number(port);
   const validPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : null;
   const portNum = protocol === "icmp" ? null : validPort;
@@ -36,11 +39,16 @@ export default function DiagnosticsPage() {
   const inbound = src === "internet";
   const dstOpts = inbound
     ? WAN_IDS.map((id) => ({ value: id, label: `${WAN_NAMES[id]} · ${WAN_IPS[id]}` }))
-    : [{ value: "internet", label: "インターネット" }, { value: "ip", label: "IPv4 アドレスを指定" }, ...clientOpts.filter((o) => o.value !== src)];
+    : [{ value: "internet", label: "インターネット" }, { value: "ip", label: "IP アドレスを指定" }, ...clientOpts.filter((o) => o.value !== src)];
   const dst = dstOpts.some((o) => o.value === selectedDst) ? selectedDst : inbound ? "wan1" : "internet";
   const activeProtocol = inbound && protocol === "icmp" ? "tcp" : protocol;
-  const invalidIp = dst === "ip" && parseIp(destinationIp) === null;
-  const run = () => setRan(dst === "ip" ? { srcId: src, dst: "internet", dstIp: destinationIp.trim() } : { srcId: src, dst });
+  const invalidIp = dst === "ip" && (family === "ipv6" ? parseIpv6(destinationIp) : parseIp(destinationIp)) === null;
+  const run = () => {
+    const selection = { srcId: src, dst: dst === "ip" ? "internet" : dst, dstIp: dst === "ip" ? destinationIp.trim() : undefined, family: inbound ? "ipv4" as const : family };
+    const outcome = trace(s, { ...selection, protocol: activeProtocol, port: activeProtocol === "icmp" ? null : validPort }, states);
+    useSecurityLog.getState().record(s.clients.find((client) => client.id === src)?.name ?? src, outcome.security);
+    setRan(selection);
+  };
   const changeSource = (id: string) => {
     if (id === dst) setDst("internet");
     if (id === "internet" && protocol === "icmp") setProtocol("tcp");
@@ -76,8 +84,12 @@ export default function DiagnosticsPage() {
             <Field label="宛先">
               <Select aria-label="トレースの宛先" value={dst} onChange={setDst} options={dstOpts} />
             </Field>
-            {dst === "ip" && <Field label="宛先 IPv4" hint="静的ルートや VPN の対向ネットワーク内の IP を指定します。">
-              <Input aria-label="宛先 IPv4" value={destinationIp} placeholder="10.20.0.10" onChange={(e) => setDestinationIp(e.target.value)} />
+            {!inbound && <Field label="IP バージョン">
+              <Select aria-label="トレースの IP バージョン" value={family} onChange={(v) => setFamily(v as IpFamily)}
+                options={[{ value: "ipv4", label: "IPv4" }, { value: "ipv6", label: "IPv6" }]} />
+            </Field>}
+            {dst === "ip" && <Field label="宛先 IP アドレス">
+              <Input aria-label="宛先 IP アドレス" value={destinationIp} placeholder={family === "ipv6" ? "2001:db8:ffff::10" : "10.20.0.10"} onChange={(e) => setDestinationIp(e.target.value)} />
             </Field>}
             <Field label="プロトコル">
               <Segmented<Protocol>
@@ -143,7 +155,8 @@ export default function DiagnosticsPage() {
                   scenario={s}
                   clientId={ran.srcId}
                   transport={{ scheme: portNum === 443 ? "https" : "http", port: portNum }}
-                  result={probe(s, ran.srcId, webService.host, "tcp", portNum)}
+                  result={probe(s, ran.srcId, webService.host, "tcp", portNum, ran.family)}
+                  family={ran.family}
                   problem={webError(webService, webService.host, portNum === 443 ? "https" : "http", portNum)}
                   event={{ method: "GET", path: "/", status: "200 OK" }}
                 />

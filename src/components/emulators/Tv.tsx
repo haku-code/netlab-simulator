@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import { ChevronLeft, Clapperboard, Gauge, Settings, Tv as TvIcon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useSecurityLog } from "@/lib/security-log";
 import { probe } from "@/lib/emu";
 import { LinkIcon, NetworkSettings, WhyBox, WifiList, useEmu } from "./apps";
 import { useClock } from "./Desktop";
@@ -45,7 +46,10 @@ export function Tv({ clientId }: { clientId: string }) {
                 <button
                   key={t.id}
                   onMouseEnter={() => setFocus(i)}
-                  onClick={() => setScreen(t.id)}
+                  onClick={() => {
+                    if (t.id === "video") useSecurityLog.getState().record(client.name, stream.security);
+                    setScreen(t.id);
+                  }}
                   className={clsx("flex h-28 w-44 flex-col justify-end rounded-lg p-3 text-left transition-transform", focus === i && "scale-105 ring-2 ring-white")}
                   style={{ background: `linear-gradient(150deg, ${t.color}, #111)` }}
                 >

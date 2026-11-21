@@ -5,6 +5,7 @@ import { Plus } from "lucide-react";
 import { BackLink, Button, Checkbox, FormRow, FormSection, Input, Notice, PageHeader, Select, Toggle, table as t, useDraft } from "@/components/ui";
 import { useIssues, useQueryId } from "@/lib/hooks";
 import { ipToStr, maskStr, parseCidr, parseIp } from "@/lib/net/ip";
+import { formatIpv6, ipv6Gateway, lanIpv6Prefix } from "@/lib/net/ipv6";
 import { clientNetworkId, zoneName } from "@/lib/net/simulate";
 import { DEFAULT_DHCP_LEASE_TIME, uid, type Network, type Scenario } from "@/lib/model";
 import { useStore } from "@/lib/store";
@@ -45,6 +46,7 @@ export default function NetworksPage() {
                 <td className={clsx(t.td, "tnum")}>{n.vlanId}</td>
                 <td className={clsx(t.td, "tnum")}>
                   {n.gatewayIp}/{parseCidr(n.cidr)?.prefix ?? "?"}
+                  {n.ipv6Prefix !== undefined && <div className="text-muted">{n.ipv6Prefix}</div>}
                 </td>
                 <td className={t.td}>{zoneName(s, n.zoneId)}</td>
                 <td className={clsx(t.td, "tnum text-fg-2")}>{n.dhcp.enabled ? `${n.dhcp.start} - ${n.dhcp.end}` : "なし"}</td>
@@ -133,12 +135,18 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
   const invalidLease = leaseTime !== undefined && (!Number.isSafeInteger(leaseTime) || leaseTime < 1);
   const dns = (draft.dhcp.dns ?? []).flatMap((entry) => entry.trim().split(/\s+/)).filter(Boolean);
   const invalidDns = dns.some((entry) => parseIp(entry) === null);
+  const ipv6Enabled = draft.ipv6Prefix !== undefined;
+  const ipv6 = lanIpv6Prefix(draft.ipv6Prefix);
+  const ipv6Error = !ipv6Enabled ? undefined : !ipv6 ? "グローバルまたは ULA の /64 を入力してください。"
+    : s.networks.some((n) => n.id !== draft.id && lanIpv6Prefix(n.ipv6Prefix)?.network === ipv6.network)
+      ? "別のネットワークと IPv6 プレフィックスが重複しています。" : undefined;
 
   const save = () => {
     mutate((sc) => {
       const dnsServers = dns.map(parseIp).filter((ip) => ip !== null).map(ipToStr);
       const n = {
         ...draft,
+        ipv6Prefix: ipv6 ? `${formatIpv6(ipv6.network)}/64` : undefined,
         name: draft.name.trim() || `VLAN${draft.vlanId}`,
         dhcp: { ...draft.dhcp, dns: dnsServers.length ? [...new Set(dnsServers)] : undefined },
       };
@@ -226,6 +234,19 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
           </>
         )}
       </FormSection>
+      <FormSection title="IPv6">
+        <FormRow label="IPv6 アドレスの自動設定 (SLAAC)" hint="ルーター広告でこの VLAN の端末にプレフィックスを配ります。">
+          <Toggle label="IPv6 アドレスの自動設定" checked={ipv6Enabled} onChange={(enabled) => update((n) => {
+            n.ipv6Prefix = enabled ? `2001:db8:1:${n.vlanId.toString(16)}::/64` : undefined;
+          })} />
+        </FormRow>
+        {ipv6Enabled && (
+          <FormRow label="IPv6 プレフィックス" error={ipv6Error} hint={ipv6 ? `ゲートウェイ ${ipv6Gateway(draft)}` : undefined}>
+            <Input aria-label="IPv6 プレフィックス" aria-invalid={!!ipv6Error} value={draft.ipv6Prefix} placeholder="2001:db8:1:1::/64"
+              onChange={(e) => update((n) => (n.ipv6Prefix = e.target.value))} />
+          </FormRow>
+        )}
+      </FormSection>
       <FormSection title="詳細設定">
         <FormRow label="インターネット接続を許可" term="nat">
           <div className="flex h-8 items-center">
@@ -239,7 +260,7 @@ function NetworkForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () =>
         </FormRow>
       </FormSection>
       <div className="sticky bottom-0 -mx-1 flex gap-2 border-t border-line bg-bg px-1 py-3">
-        <Button variant="primary" disabled={(!isNew && !dirty) || (draft.dhcp.enabled && (invalidLease || invalidDns))} onClick={save}>
+        <Button variant="primary" disabled={(!isNew && !dirty) || !!ipv6Error || (draft.dhcp.enabled && (invalidLease || invalidDns))} onClick={save}>
           {isNew ? "ネットワークを追加" : "変更を適用"}
         </Button>
         {!isNew && (

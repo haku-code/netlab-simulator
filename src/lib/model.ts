@@ -1,7 +1,8 @@
 import type { WifiSecurity } from "./wifi-security";
+import type { SecuritySettings } from "./net/security";
 // ネットワーク構成のデータモデル。すべてブラウザ内で完結する仮想ネットワーク。
 
-import type { Floor } from "./floor";
+import type { Band, Floor } from "./floor";
 
 export interface XY {
   x: number;
@@ -40,6 +41,8 @@ export interface Device {
   pos?: XY;
   /** AP の送信出力 */
   txPower?: "high" | "medium" | "low";
+  wifiRadios?: Partial<Record<Band, { channel: number; width: number }>>;
+  meshParentId?: string;
 }
 
 export interface PortRef {
@@ -76,6 +79,7 @@ export interface Network {
   isolateNetwork: boolean;
   internetAccess: boolean;
   zoneId: string;
+  ipv6Prefix?: string;
 }
 
 export interface Zone {
@@ -90,6 +94,9 @@ export interface WifiSsid {
   networkId: string | null;
   security: WifiSecurity;
   enterpriseIdentity?: string;
+  radius?: { online: boolean; users: { identity: string; password: string }[] };
+  ppsk?: Record<string, string>;
+  captivePortal?: { id: string; password: string };
   password: string;
   /** Client Device Isolation: 同じ SSID の無線クライアント同士の通信を遮断 */
   clientIsolation: boolean;
@@ -176,6 +183,7 @@ export interface Client {
   wifiIdentity?: string;
   wifiCertificate?: boolean;
   wifiLegacyOnly?: boolean;
+  guestPortalSession?: string;
   webService?: WebService;
   /** WPA3 に対応しているか（古い TV や IoT 機器は非対応） */
   wpa3: boolean;
@@ -248,6 +256,8 @@ export interface Scenario {
   links: Link[];
   clients: Client[];
   ssids: WifiSsid[];
+  security?: SecuritySettings;
+  ipv6Wan?: boolean;
   /** ゾーンの組ごとに上から順に評価される */
   policies: FirewallPolicy[];
   /** mDNS リフレクター: 指定したネットワーク間でサービス広告 (Bonjour) を中継する */

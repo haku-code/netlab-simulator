@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Button, Checkbox, Field, Input, PageHeader, Select, SidePanel, table as t, useDraft } from "@/components/ui";
 import { uid, type PolicyObject } from "@/lib/model";
 import { ipToStr, parseCidr, parseIp, subnetToStr } from "@/lib/net/ip";
+import { formatIpv6, parseIpv6, parseIpv6Cidr } from "@/lib/net/ipv6";
 import { GROUP_REF } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
 
@@ -63,7 +64,11 @@ function ObjectPanel({ id, onClose }: { id: string; onClose: () => void }) {
     if (draft.kind === "ports") return /^\d+$/.test(token) && Number(token) >= 1 && Number(token) <= 65535 ? String(Number(token)) : null;
     const cidr = parseCidr(token);
     const ip = parseIp(token);
-    return cidr ? subnetToStr(cidr) : ip === null ? null : ipToStr(ip);
+    if (cidr) return subnetToStr(cidr);
+    if (ip !== null) return ipToStr(ip);
+    const prefix = parseIpv6Cidr(token);
+    const ipv6 = parseIpv6(token);
+    return prefix ? `${formatIpv6(prefix.network)}/${prefix.prefix}` : ipv6 === null ? null : formatIpv6(ipv6);
   });
   const values = draft.kind === "devices"
     ? draft.values.filter((v) => s.clients.some((c) => c.id === v))
@@ -109,11 +114,11 @@ function ObjectPanel({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         </Field>
       ) : (
-        <Field label={draft.kind === "ips" ? "IPv4 / CIDR" : "ポート番号"}
-          hint={draft.kind === "ips" ? "例 192.168.1.20、192.168.30.0/24。改行またはカンマ区切り。" : "1〜65535 の整数を、改行またはカンマで区切ります。"}
+        <Field label={draft.kind === "ips" ? "IP アドレス / CIDR" : "ポート番号"}
+          hint={draft.kind === "ips" ? "例 192.168.1.20、192.168.30.0/24、2001:db8:1::/64。改行またはカンマ区切り。" : "1〜65535 の整数を、改行またはカンマで区切ります。"}
           error={invalid.length ? `無効な値があります（${invalid.join("、")}）。` : undefined}
         >
-          <textarea aria-label={draft.kind === "ips" ? "IPv4 / CIDR" : "ポート番号"} aria-invalid={!!invalid.length}
+          <textarea aria-label={draft.kind === "ips" ? "IP アドレス / CIDR" : "ポート番号"} aria-invalid={!!invalid.length}
             rows={5} value={entries} onChange={(e) => setEntries(e.target.value)}
             className="tnum w-full rounded border border-line bg-surface px-2.5 py-2 outline-none focus:border-accent" />
         </Field>

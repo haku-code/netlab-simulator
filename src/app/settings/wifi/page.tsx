@@ -8,8 +8,9 @@ import { networkOptions, useIssues, useQueryId } from "@/lib/hooks";
 import { uid, type Scenario, type WifiSsid } from "@/lib/model";
 import { findNetwork } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
+import { CaptivePortalSettings, SsidAuthentication } from "@/components/wifi/SsidAccessSettings";
 
-import { DEFAULT_ENTERPRISE_USER, WIFI_SECURITY as SEC, wifiMode, wifiSupports6GHz } from "@/lib/wifi-security";
+import { WIFI_SECURITY as SEC, wifiMode, wifiSupports6GHz } from "@/lib/wifi-security";
 
 const BANDS = [
   { v: "2.4", l: "2.4 GHz" },
@@ -52,7 +53,7 @@ export default function WifiPage() {
                 <tr key={w.id} className={t.tr} onClick={() => setSelId(w.id)}>
                   <td className={clsx(t.td, "font-medium")}>{w.name}</td>
                   <td className={t.td}>{n ? n.name : <span className="text-err">未割当</span>}</td>
-                  <td className={clsx(t.td, w.security === "open" ? "text-warn" : "text-fg-2")}>{SEC[w.security].label}</td>
+                  <td className={clsx(t.td, w.security === "open" ? "text-warn" : "text-fg-2")}>{SEC[w.security].label}{w.captivePortal && " · ゲストポータル"}</td>
                   <td className={clsx(t.td, "text-fg-2")}>{w.bands.map((b) => `${b} GHz`).join(", ")}</td>
                   <td className={clsx(t.td, "text-fg-2")}>
                     {!w.apIds ? "すべての AP" : s.devices.filter((d) => w.apIds!.includes(d.id)).map((d) => d.name).join(", ") || <span className="text-warn">なし</span>}
@@ -79,15 +80,27 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
   const [showPw, setShowPw] = useState(false);
   if (!draft) return <BackLink onClick={onBack}>Wi-Fi</BackLink>;
   const { auth } = wifiMode(draft.security);
+  const radiusUsers = auth === "enterprise" ? draft.radius?.users : undefined;
+  const userNames = radiusUsers?.map((user) => user.identity.trim());
+  const incompleteUsers = !!radiusUsers?.some((user) => !user.identity.trim() || !user.password)
+    || !!userNames && new Set(userNames).size !== userNames.length;
+  const missingPortalCode = !!draft.captivePortal && !draft.captivePortal.password.trim();
   const inUse = s.clients.some((c) => c.connection.type === "wifi" && c.connection.ssidId === id);
 
   const save = () => {
     mutate((sc) => {
       const w = { ...draft, name: draft.name.trim() || "新しい Wi-Fi" };
       const i = sc.ssids.findIndex((x) => x.id === w.id);
+      if (radiusUsers && w.radius) w.radius = { ...w.radius, users: radiusUsers.map((user) => ({ ...user, identity: user.identity.trim() })) };
+      if (w.captivePortal && w.captivePortal.password !== sc.ssids[i]?.captivePortal?.password)
+        w.captivePortal = { ...w.captivePortal, id: uid("portal") };
       // ネットワークが変わると AP が再プロビジョニングされ、端末は再接続して IP を取り直す
       if (i >= 0 && sc.ssids[i].networkId !== w.networkId)
-        for (const c of sc.clients) if (c.connection.type === "wifi" && c.connection.ssidId === w.id) c.lease = null;
+        for (const c of sc.clients) {
+          if (c.connection.type !== "wifi" || c.connection.ssidId !== w.id) continue;
+          c.lease = null;
+          c.guestPortalSession = undefined;
+        }
       if (i >= 0) sc.ssids[i] = w;
       else sc.ssids.push(w);
     });
@@ -109,33 +122,26 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
             <Select value={draft.security} onChange={(v) => update((w) => (w.security = v as WifiSsid["security"]))} options={Object.entries(SEC).map(([value, { label }]) => ({ value, label }))} />
           </label>
         </FormRow>
-        {auth === "enterprise" && (
-          <FormRow label="実習用 802.1X ユーザー" hint="この SSID の仮想認証で照合するアカウントです。">
-            <Input aria-label="802.1X ユーザー" value={draft.enterpriseIdentity ?? DEFAULT_ENTERPRISE_USER} onChange={(e) => update((w) => (w.enterpriseIdentity = e.target.value))} />
-          </FormRow>
-        )}
-        {auth === "certificate" && <p className="text-[12px] text-muted">クライアントの設定で「実習用 Wi-Fi 証明書」を登録してから接続します。</p>}
-        <FormRow label={draft.security === "wep" ? "WEP キー" : "パスワード"}>
+        <SsidAuthentication draft={draft} clients={s.clients} update={update} />
+        {auth === "shared" && <FormRow label={draft.security === "wep" ? "WEP キー" : "パスワード"}>
           <div className="relative">
             <Input
               type={showPw ? "text" : "password"}
               aria-label="Wi-Fi パスワード"
               className="pr-9"
               value={draft.password}
-              disabled={auth === "none" || auth === "certificate"}
               onChange={(e) => update((w) => (w.password = e.target.value))}
             />
             <button
               type="button"
               onClick={() => setShowPw((v) => !v)}
-              disabled={auth === "none" || auth === "certificate"}
               className="absolute top-1/2 right-2 -translate-y-1/2 text-muted hover:text-fg"
               aria-label={showPw ? "パスワードを隠す" : "パスワードを表示"}
             >
               {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
             </button>
           </div>
-        </FormRow>
+        </FormRow>}
         <WifiSecurityReview draft={draft} clients={s.clients} />
         <FormRow label="ネットワーク" term="vlan" hint="AP はこの SSID の通信を選んだネットワークの VLAN タグを付けて上流へ送ります。">
           <Select value={draft.networkId ?? ""} onChange={(v) => update((w) => (w.networkId = v || null))} options={networkOptions(s, { none: "なし" })} />
@@ -166,6 +172,7 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
         </FormRow>
       </FormSection>
       <FormSection title="詳細設定">
+        <CaptivePortalSettings draft={draft} update={update} />
         <FormRow label="Wi-Fi 周波数帯">
           <div className="flex gap-4">
             {BANDS.map((b) => (
@@ -188,7 +195,7 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
         </FormRow>
       </FormSection>
       <div className="sticky bottom-0 -mx-1 flex gap-2 border-t border-line bg-bg px-1 py-3">
-        <Button variant="primary" disabled={!isNew && !dirty} onClick={save}>
+        <Button variant="primary" disabled={(!isNew && !dirty) || incompleteUsers || missingPortalCode} onClick={save}>
           {isNew ? "Wi-Fi を追加" : "変更を適用"}
         </Button>
         {!isNew && (
@@ -213,6 +220,8 @@ function WifiForm({ s, id, onBack }: { s: Scenario; id: string; onBack: () => vo
           </Button>
         )}
       </div>
+      {incompleteUsers && <p role="alert" className="text-[12px] text-err">RADIUS ユーザーには重複しない名前とパスワードが必要です。</p>}
+      {missingPortalCode && <p role="alert" className="text-[12px] text-err">ゲスト用アクセスコードを入力してください。</p>}
     </div>
   );
 }
@@ -222,7 +231,7 @@ function WifiSecurityReview({ draft, clients }: { draft: WifiSsid; clients: Scen
   const incompatible = wifiMode(draft.security).requiresWpa3
     ? clients.filter((c) => !c.wpa3 && c.connection.type === "wifi" && c.connection.ssidId === draft.id)
     : [];
-  const shortPassword = (wifiMode(draft.security).auth === "shared" || wifiMode(draft.security).auth === "enterprise")
+  const shortPassword = wifiMode(draft.security).auth === "shared"
     && draft.security !== "wep" && [...draft.password].length < 16;
 
   return (

@@ -11,8 +11,12 @@ import type {
   WifiSsid,
 } from "../model";
 import { CONNECT_DBM, rssiAt } from "../floor";
-import { negotiatedWifiSecurity, wifiCredentialsMatch, wifiMode, wifiSupports6GHz } from "../wifi-security";
+import { negotiatedWifiSecurity, wifiAuthError, wifiMode, wifiSupports6GHz } from "../wifi-security";
+import { GUEST_PORTAL_REQUIRED, pendingGuestPortal } from "../wifi";
+import { apInterference, apRadio, isMeshEdge, meshHop, radioHash, radioRate } from "./wifi-radio";
 import { inSubnet, ipToStr, isHostAddr, parseCidr, parseIp } from "./ip";
+import { formatIpv6, inIpv6Subnet, INTERNET_IP6, ipv6Gateway, isGlobalIpv6, lanIpv6Prefix, parseIpv6, parseIpv6Cidr, slaacAddress, type IpFamily } from "./ipv6";
+import { inspectTraffic, type SecurityDecision } from "./security";
 import { EXTERNAL_TEST_IP, INTERNET_IP, WAN_IPS, WAN_NAMES, chooseWan, gatewayRoute, isPrivateIp, QOS_LABELS, wanBandwidth, wanSettings } from "./gateway";
 import { listensOn } from "./services";
 
@@ -83,6 +87,9 @@ function linkCheck(s: Scenario, link: Link, netId: string | null) {
 }
 
 function bfs(s: Scenario, from: string, to: string, netId: string | null) {
+  const meshAps = s.devices.filter((d) => d.type === "ap" && d.meshParentId);
+  const meshIds = new Set(meshAps.map((d) => d.id));
+  const mesh = meshAps.flatMap((d) => meshHop(s, d) ?? []);
   const prev = new Map<string, { dev: string; link: string } | null>();
   prev.set(from, null);
   const q = [from];
@@ -93,7 +100,15 @@ function bfs(s: Scenario, from: string, to: string, netId: string | null) {
       const other =
         l.a.deviceId === cur ? l.b.deviceId : l.b.deviceId === cur ? l.a.deviceId : null;
       if (!other || prev.has(other)) continue;
+      if (meshIds.has(cur) || meshIds.has(other)) continue;
+      if (netId === null && meshIds.has(to) && (!findPort(s, l.a.deviceId, l.a.portId)?.enabled || !findPort(s, l.b.deviceId, l.b.portId)?.enabled)) continue;
       if (!linkCheck(s, l, netId).ok) continue;
+      prev.set(other, { dev: cur, link: l.id });
+      q.push(other);
+    }
+    for (const l of mesh) {
+      const other = l.child.id === cur ? l.parent.id : l.parent.id === cur ? l.child.id : null;
+      if (!other || prev.has(other)) continue;
       prev.set(other, { dev: cur, link: l.id });
       q.push(other);
     }
@@ -119,6 +134,15 @@ export function uplinkOf(s: Scenario, deviceId: string) {
   if (gw.id === deviceId) return { online: true as const };
   const path = bfs(s, gw.id, deviceId, null);
   if (!path) return { online: false as const };
+  const ap = findDevice(s, deviceId);
+  const wireless = ap?.meshParentId ? meshHop(s, ap) : null;
+  if (wireless) return {
+    online: true as const,
+    parentId: wireless.parent.id,
+    parentName: wireless.parent.name,
+    parentPort: "メッシュ (5 GHz)",
+    ownPort: "メッシュ (5 GHz)",
+  };
   const link = s.links.find((l) => l.id === path.linkIds[path.linkIds.length - 1])!;
   const [mine, parent] = link.a.deviceId === deviceId ? [link.a, link.b] : [link.b, link.a];
   return {
@@ -138,7 +162,7 @@ export function l2Path(s: Scenario, netId: string, from: string, to: string): L2
   if (!phys) {
     return {
       ok: false,
-      reason: `${findDevice(s, from)?.name} から ${findDevice(s, to)?.name} へ物理的なケーブル接続がありません。`,
+      reason: `${findDevice(s, from)?.name} から ${findDevice(s, to)?.name} へのリンク経路がありません。`,
       failLinkIds: [],
       deviceIds: [from],
       linkIds: [],
@@ -146,7 +170,8 @@ export function l2Path(s: Scenario, netId: string, from: string, to: string): L2
   }
   // 物理経路上で最初に通れないリンクを探す
   for (let i = 0; i < phys.linkIds.length; i++) {
-    const link = s.links.find((l) => l.id === phys.linkIds[i])!;
+    const link = s.links.find((l) => l.id === phys.linkIds[i]);
+    if (!link) continue; // メッシュは親 AP の Ethernet 側まで VLAN を透過する
     const r = linkCheck(s, link, netId);
     if (!r.ok) {
       return {
@@ -174,12 +199,6 @@ export function clientBands(c: Client): Band[] {
   return ["2.4", "5"];
 }
 
-function hash(str: string) {
-  let h = 0;
-  for (const ch of str) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return h;
-}
-
 function commonWifiBands(c: Client, ssid: WifiSsid) {
   const supported = clientBands(c);
   const allows6GHz = wifiSupports6GHz(negotiatedWifiSecurity(ssid.security, c));
@@ -190,17 +209,26 @@ function commonWifiBands(c: Client, ssid: WifiSsid) {
 
 export const isPositional = (s: Scenario, c: Client) => !!s.floor && !!c.pos;
 
+function clientSignal(s: Scenario, c: Client, ssid: WifiSsid, ap: Device) {
+  const common = commonWifiBands(c, ssid);
+  if (!common.length) return null;
+  const { floor } = s;
+  const { pos } = c;
+  if (!floor || !pos || !ap.pos) return syntheticSignal(c, ap.id, common[0]);
+  const links = common.map((band) => ({ band, rssi: rssiAt(floor, ap, pos, band) }));
+  return links.find((l) => l.rssi >= -70) ?? links.reduce((a, b) => (b.rssi > a.rssi ? b : a));
+}
+
 /** 位置と電波から、端末と AP の無線リンクを求める（よい帯域を優先、弱ければ 2.4 GHz に落ちる） */
 export function radioLink(s: Scenario, c: Client, ssid: WifiSsid, apId: string) {
   const ap = findDevice(s, apId);
-  const common = commonWifiBands(c, ssid);
-  if (!ap || !common.length) return null;
-  if (!isPositional(s, c) || !ap.pos) return wifiLink(c, ssid, apId);
-  const links = common.map((band) => ({ band, rssi: rssiAt(s.floor!, ap, c.pos!, band) }));
-  const pick = links.find((l) => l.rssi >= -70) ?? links.reduce((a, b) => (b.rssi > a.rssi ? b : a));
-  const base = wifiLink(c, ssid, apId)!;
-  const rate = pick.band === "2.4" ? 144 : pick.band === "5" ? 866 : 1201;
-  return { ...base, band: pick.band, rssi: pick.rssi, rate: Math.round(rate * (pick.rssi > -55 ? 1 : pick.rssi > -65 ? 0.7 : pick.rssi > -72 ? 0.4 : 0.15)) };
+  if (!ap || ap.type !== "ap") return null;
+  const signal = clientSignal(s, c, ssid, ap);
+  if (!signal) return null;
+  const { band, rssi } = signal;
+  const radio = apRadio(ap, band);
+  const interference = c.pos && ap.pos ? apInterference(s, ap, band, c.pos) : { neighbors: 0, airtime: 1 };
+  return { ...signal, ...radio, neighbors: interference.neighbors, rate: radioRate(band, radio.width, rssi, interference.airtime) };
 }
 
 /** その SSID を配信している AP のうち、電波が最も強いものを選ぶ */
@@ -208,9 +236,11 @@ export function associate(s: Scenario, c: Client, ssid: WifiSsid): { ok: true; a
   const aps = s.devices.filter((d) => d.type === "ap" && broadcasts(ssid, d.id));
   if (!aps.length) return { ok: false, reason: `SSID「${ssid.name}」はどの AP からも配信されていません（配信 AP の設定）。` };
   const cands = aps.flatMap((ap) => {
-    const l = radioLink(s, c, ssid, ap.id);
+    const l = clientSignal(s, c, ssid, ap);
+    if (ap.meshParentId && !uplinkOf(s, ap.id).online) return [];
     return l ? [{ ap, rssi: l.rssi }] : [];
   });
+  if (!cands.length && aps.every((ap) => ap.meshParentId && !uplinkOf(s, ap.id).online)) return { ok: false, reason: `SSID「${ssid.name}」を配信する AP のメッシュアップリンクが利用できません。` };
   if (!cands.length) return { ok: false, reason: `この端末は ${clientBands(c).join(" / ")} GHz のみ対応ですが、SSID「${ssid.name}」は ${ssid.bands.join(" / ")} GHz で配信されています。端末から SSID が見えません。` };
   const best = cands.reduce((a, b) => (b.rssi > a.rssi ? b : a));
   if (best.rssi < CONNECT_DBM)
@@ -223,16 +253,19 @@ export function broadcasts(ssid: WifiSsid, apId: string) {
   return !ssid.apIds || ssid.apIds.includes(apId);
 }
 
-/** 端末と SSID の無線リンク（最も速い共通の周波数帯でつながる） */
-export function wifiLink(c: Client, ssid: WifiSsid, apId: string) {
-  const common = commonWifiBands(c, ssid);
-  const band = common[0];
-  if (!band) return null;
-  const h = hash(c.id + apId);
+function syntheticSignal(c: Client, apId: string, band: Band) {
+  const h = radioHash(c.id + apId);
   const rssi = -42 - (h % 24) + (band === "2.4" ? 6 : band === "6" ? -5 : 0);
-  const channel = band === "2.4" ? [1, 6, 11][h % 3] : band === "5" ? [36, 44, 149][h % 3] : [37, 69, 101][h % 3];
-  const rate = band === "2.4" ? 144 : band === "5" ? 866 : 1201;
-  return { band, rssi, channel, rate: Math.round(rate * (rssi > -55 ? 1 : rssi > -65 ? 0.7 : 0.4)) };
+  return { band, rssi };
+}
+
+/** 位置情報がないときの無線リンク。SSID の周波数帯との互換性の判定にも使う。 */
+export function wifiLink(c: Client, ssid: WifiSsid, apId: string) {
+  const [band] = commonWifiBands(c, ssid);
+  if (!band) return null;
+  const signal = syntheticSignal(c, apId, band);
+  const radio = apRadio({ id: apId }, band);
+  return { ...signal, ...radio, neighbors: 0, rate: radioRate(band, radio.width, signal.rssi) };
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +284,18 @@ export interface ClientState {
   error?: string;
   errorStage?: "attach" | "ip";
   wifiAuthFailed?: true;
+  guestPortal?: WifiSsid;
   /** 古いネットワークで取得した IP を使い続けている */
   staleLease?: boolean;
+}
+
+export function ipv6ClientState(state: ClientState): ClientState {
+  if (state.errorStage === "attach" || !state.network) return state;
+  const ip = state.toGateway?.ok ? slaacAddress(state.network, state.client) : undefined;
+  const error = ip ? undefined : state.toGateway?.ok
+    ? `${state.network.name} で IPv6 プレフィックスが設定されていません。`
+    : "IPv6 ルーター広告が端末に届きません。";
+  return { ...state, ip, error, errorStage: error ? "ip" : undefined, staleLease: undefined };
 }
 
 export function resolveClient(s: Scenario, clientId: string): ClientState {
@@ -296,6 +339,7 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
     } else {
       ap = findDevice(s, c.apId);
       if (!ap || ap.type !== "ap") return { ...st, error: "接続先の AP が存在しません。", errorStage: "attach" };
+      if (ap.meshParentId && !uplinkOf(s, ap.id).online) return { ...st, error: `${ap.name} のメッシュアップリンクが利用できません。`, errorStage: "attach" };
       if (!broadcasts(ssid, ap.id)) {
         return { ...st, error: `${ap.name} は SSID「${ssid.name}」を配信していません（配信 AP の設定）。`, errorStage: "attach" };
       }
@@ -314,9 +358,8 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
     if (client.wifiLegacyOnly && !["open", "wep", "wpa", "wpa-enterprise"].includes(mode)) {
       return { ...st, error: "この端末は WEP / 初代 WPA まで対応します。", errorStage: "attach" };
     }
-    if (!wifiCredentialsMatch(ssid, client)) {
-      const auth = wifiMode(mode).auth;
-      const reason = auth === "certificate" ? "実習用の端末証明書が登録されていません" : auth === "enterprise" ? "ユーザー名またはパスワードを確認してください" : "パスワードが違います";
+    const reason = wifiAuthError(ssid, client);
+    if (reason) {
       return { ...st, error: `SSID「${ssid.name}」の認証に失敗しました（${reason}）。`, errorStage: "attach", wifiAuthFailed: true };
     }
     st.attachDeviceId = ap.id;
@@ -326,6 +369,7 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
     }
     st.network = net;
     st.how = `${ap.name} · ${ssid.name}`;
+    st.guestPortal = pendingGuestPortal(s, client);
   }
 
   const net = st.network!;
@@ -503,6 +547,11 @@ function refMatches(s: Scenario, ref: string, netId: string | null, clientId: st
     if (!o) return false;
     if (o.kind === "devices") return !!clientId && o.values.includes(clientId);
     if (o.kind === "ips" && ip) {
+      const ipv6 = parseIpv6(ip);
+      if (ipv6 !== null) return o.values.some((value) => {
+        const prefix = parseIpv6Cidr(value);
+        return prefix ? inIpv6Subnet(ipv6, prefix) : ipv6 === parseIpv6(value);
+      });
       const n = parseIp(ip);
       return n !== null && o.values.some((v) => (v.includes("/") ? !!parseCidr(v) && inSubnet(n, parseCidr(v)!) : v.trim() === ip));
     }
@@ -596,6 +645,8 @@ export interface TraceQuery {
   /** クライアント ID、"internet"、外部テスト端末からなら WAN ID */
   dst: string;
   dstIp?: string;
+  dstHost?: string;
+  family?: IpFamily;
   protocol: Protocol;
   port: number | null;
 }
@@ -627,10 +678,11 @@ export interface TraceResult {
   /** パケットが止められたノード */
   failAt: string | null;
   route?: TraceRoute;
+  security?: SecurityDecision[];
 }
 
 export type TraceRoute =
-  | { kind: "wan"; wan: WanId; targetIp: string }
+  | { kind: "wan"; wan: WanId; targetIp: string; family?: "ipv6" }
   | { kind: "vpn"; wan: WanId; targetIp: string; endpoint: string; name: string }
   | { kind: "static"; targetIp: string; nextHopId: string }
   | { kind: "forward"; wan: WanId; targetId?: string; targetIp?: string; targetPort?: number };
@@ -641,6 +693,7 @@ function protoLabel(p: Protocol, port: number | null) {
 
 /** states は同一スナップショットの複数のトレースで共有できる。 */
 export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, ClientState>): TraceResult {
+  const ipv6 = q.family === "ipv6" || parseIpv6(q.dstIp ?? "") !== null;
   const hops: Hop[] = [];
   const devs = new Set<string>();
   const links = new Set<string>();
@@ -649,6 +702,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   const gw = findGateway(s);
   const gwId = gw?.id;
   let route: TraceRoute | undefined;
+  let security: SecurityDecision[] | undefined;
   const addPath = (r: L2Result) => {
     r.deviceIds.forEach((d) => devs.add(d));
     r.linkIds.forEach((l) => links.add(l));
@@ -667,12 +721,14 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     segments: segs,
     failAt,
     ...(route ? { route } : {}),
+    ...(security?.length ? { security } : {}),
   });
   const tagInfo = (linkId: string, fromDev: string, netId: string) => {
+    const vlan = findNetwork(s, netId)?.vlanId ?? null;
+    if (isMeshEdge(linkId)) return { label: `メッシュ · VLAN ${vlan ?? "?"}`, vlan, medium: "wifi" as const };
     const l = s.links.find((x) => x.id === linkId);
     const end = l ? (l.a.deviceId === fromDev ? l.a : l.b) : null;
     const port = end ? findPort(s, end.deviceId, end.portId) : undefined;
-    const vlan = findNetwork(s, netId)?.vlanId ?? null;
     const c = port ? carries(port, netId) : null;
     return {
       label: c === "tagged" ? `VLAN ${vlan} · タグ付き` : c === "untagged" ? `タグなし (VLAN ${vlan})` : `VLAN ${vlan} 不許可`,
@@ -704,13 +760,17 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     });
   };
 
-  const stateOf = (id: string) => states?.get(id) ?? resolveClient(s, id);
+  const stateOf = (id: string) => {
+    const state = states?.get(id) ?? resolveClient(s, id);
+    return ipv6 ? ipv6ClientState(state) : state;
+  };
   const hostAt = (ip: string) => {
+    const address6 = ipv6 ? parseIpv6(ip) : null;
     const address = parseIp(ip);
-    if (address === null) return undefined;
+    if (address === null && address6 === null) return undefined;
     for (const client of s.clients) {
       const state = stateOf(client.id);
-      if (state.ip && parseIp(state.ip) === address) return state;
+      if (state.ip && (ipv6 ? parseIpv6(state.ip) === address6 : parseIp(state.ip) === address)) return state;
     }
     return undefined;
   };
@@ -724,6 +784,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   };
 
   if (q.srcId === "internet") {
+    if (ipv6) return stopAtGateway("外部テスト端末からのポートフォワードは IPv4 用です。");
     if (q.dst !== "wan1" && q.dst !== "wan2") return stopAtGateway("着信先の WAN を選んでください。");
     const wan = q.dst;
     const publicIp = WAN_IPS[wan];
@@ -738,6 +799,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     route = { ...route, targetId: target?.client.id, targetIp: forward.targetIp, targetPort: forward.targetPort };
     hops.push({ status: "ok", title: `DNAT「${forward.name}」`, detail: `${publicIp}:${q.port} → ${forward.targetIp}:${forward.targetPort}` });
     if (!target || !target.network || !target.attachDeviceId || target.error) return stopAtGateway("転送先 IP を使う到達可能な端末が見つかりません。");
+    if (target.guestPortal) return stopAtGateway(GUEST_PORTAL_REQUIRED);
     const flow: Flow = {
       srcZone: "external", srcNetId: null, srcClientId: null, srcIp: EXTERNAL_TEST_IP,
       dstZone: target.network.zoneId, dstNetId: target.network.id, dstClientId: target.client.id, dstIp: forward.targetIp,
@@ -768,7 +830,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   }
 
   const src = stateOf(q.srcId);
-  const proto = protoLabel(q.protocol, q.port);
+  const proto = ipv6 && q.protocol === "icmp" ? "ICMPv6 (ping)" : protoLabel(q.protocol, q.port);
 
   // 1. 所属ネットワーク
   if (!src.network) {
@@ -799,10 +861,15 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   hops.push({
     status: "ok",
     title: `IP アドレス ${src.ip}`,
-    detail: src.client.ipMode === "dhcp" ? "ゲートウェイの DHCP サーバーから取得" : "固定 IP",
+    detail: ipv6 ? "ルーター広告を受けて SLAAC で設定" : src.client.ipMode === "dhcp" ? "ゲートウェイの DHCP サーバーから取得" : "固定 IP",
   });
 
   const srcNet = src.network;
+  if (src.guestPortal) {
+    failAt = `c:${src.client.id}`;
+    hops.push({ status: "fail", title: GUEST_PORTAL_REQUIRED });
+    return done(false, GUEST_PORTAL_REQUIRED);
+  }
 
   const reachGateway = (st: ClientState, label: string): boolean => {
     const r = st.toGateway!;
@@ -872,22 +939,48 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
   };
 
   // 3. IP アドレスで指定した端末、静的経路、VPN、WAN
-  const address = q.dst === "internet" ? q.dstIp ?? INTERNET_IP : undefined;
+  const address = q.dst === "internet" ? q.dstIp ?? (ipv6 ? INTERNET_IP6 : INTERNET_IP) : undefined;
   const sourceSubnet = q.dstIp ? parseCidr(srcNet.cidr) : null;
   const addressNumber = address ? parseIp(address) : null;
-  const onLocalLink = sourceSubnet && addressNumber !== null && inSubnet(addressNumber, sourceSubnet);
-  const nextRoute = address ? gatewayRoute(s, address) : undefined;
+  const address6 = address && ipv6 ? parseIpv6(address) : null;
+  const sourcePrefix = ipv6 ? lanIpv6Prefix(srcNet.ipv6Prefix) : null;
+  const onLocalLink = ipv6
+    ? sourcePrefix && address6 !== null && inIpv6Subnet(address6, sourcePrefix)
+    : sourceSubnet && addressNumber !== null && inSubnet(addressNumber, sourceSubnet);
+  const nextRoute = address && !ipv6 ? gatewayRoute(s, address) : undefined;
   const direct = (!nextRoute || onLocalLink) && q.dstIp && q.dst === "internet" ? hostAt(q.dstIp) : undefined;
   const destination = direct?.client.id ?? q.dst;
+  const contentGate = (ip: string | undefined) => {
+    security = inspectTraffic(s, q.dstHost, ip, q.protocol, q.port);
+    security.forEach((event) => hops.push({ status: event.action === "block" ? "fail" : "info", title: event.reason, detail: event.destination }));
+    return security.find((event) => event.action === "block");
+  };
   if (destination === "internet") {
     const targetIp = address ?? INTERNET_IP;
-    if (addressNumber === null) return done(false, "宛先 IPv4 アドレスが不正です。");
+    if (ipv6 ? address6 === null : addressNumber === null) return done(false, `宛先 ${ipv6 ? "IPv6" : "IPv4"} アドレスが不正です。`);
+    if (ipv6 && address6 !== null) {
+      const gateway = s.networks.find((network) => ipv6Gateway(network) === formatIpv6(address6));
+      if (gateway) {
+        if (!reachGateway(src, "送信元")) return done(false, "ゲートウェイに到達できません。");
+        const flow: Flow = {
+          srcZone: srcNet.zoneId, srcNetId: srcNet.id, srcClientId: src.client.id, srcIp: src.ip ?? null,
+          dstZone: "gateway", dstNetId: gateway.id, dstClientId: null, dstIp: targetIp, protocol: q.protocol, port: q.port, state: "new",
+        };
+        const verdict = evalFlow(s, flow);
+        return verdict.allowed ? done(true, `IPv6 ゲートウェイ ${targetIp} に到達できます。`) : stopAtGateway("ファイアウォールで拒否されました。");
+      }
+    }
     if (onLocalLink) {
       failAt = `c:${src.client.id}`;
-      hops.push({ status: "fail", title: `${targetIp} の ARP 応答がありません` });
+      hops.push({ status: "fail", title: `${targetIp} の ${ipv6 ? "NDP" : "ARP"} 応答がありません` });
       return done(false, "同じサブネットに宛先端末が見つかりません。");
     }
     if (!reachGateway(src, "送信元")) return done(false, "ゲートウェイに到達できません。");
+    const blocked = contentGate(targetIp);
+    if (blocked) {
+      failAt = gwId ?? null;
+      return done(false, blocked.reason);
+    }
 
     if (nextRoute?.kind === "static") {
       const entry = nextRoute.route;
@@ -895,6 +988,7 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
       const next = hostAt(entry.nextHop);
       if (!next?.network || !next.attachDeviceId || next.error || !gwId)
         return stopAtGateway("静的ルートの次ホップに到達できません。", `次ホップ ${entry.nextHop} に接続済みの端末が必要です。`);
+      if (next.guestPortal) return stopAtGateway(GUEST_PORTAL_REQUIRED, `次ホップ ${entry.nextHop}`);
       const net = next.network;
       route = { kind: "static", targetIp, nextHopId: next.client.id };
       if (net.id !== srcNet.id && (net.isolateNetwork || srcNet.isolateNetwork)) return stopAtGateway("ネットワークを分離 で遮断されました。");
@@ -929,10 +1023,20 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
       return done(true, `VPN 経由で ${targetIp} に到達できます。`);
     }
 
-    if (isPrivateIp(addressNumber) || s.networks.some((n) => {
+    if (ipv6 && address6 !== null) {
+      const onLan = s.networks.some((network) => {
+        const prefix = lanIpv6Prefix(network.ipv6Prefix);
+        return prefix && inIpv6Subnet(address6, prefix);
+      });
+      if (!isGlobalIpv6(address6) || onLan) return stopAtGateway(`${targetIp} の IPv6 宛先が見つかりません。`);
+      if (!s.ipv6Wan || !srcNet.internetAccess) return stopAtGateway("IPv6 のインターネット接続が無効です。");
+      const source = parseIpv6(src.ip ?? "");
+      if (source === null || !isGlobalIpv6(source)) return stopAtGateway("インターネット接続にはグローバル IPv6 プレフィックスが必要です。");
+    }
+    if (!ipv6 && addressNumber !== null && (isPrivateIp(addressNumber) || s.networks.some((n) => {
       const subnet = parseCidr(n.cidr);
       return subnet && inSubnet(addressNumber, subnet);
-    })) return stopAtGateway(`${targetIp} に到達する経路または端末がありません。`);
+    }))) return stopAtGateway(`${targetIp} に到達する経路または端末がありません。`);
     if (!srcNet.internetAccess) {
       failAt = gwId ?? null;
       hops.push({
@@ -948,10 +1052,10 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     }
     const wan = chooseWan(s, `${q.srcId}:${targetIp}:${q.protocol}:${q.port}`);
     if (!wan) return stopAtGateway("利用できる WAN 回線がありません。");
-    route = { kind: "wan", wan, targetIp };
-    wanSegment(`NAT → ${WAN_NAMES[wan]}`);
+    route = { kind: "wan", wan, targetIp, ...(ipv6 ? { family: "ipv6" } : {}) };
+    wanSegment(`${ipv6 ? "IPv6 ルーティング" : "NAT"} → ${WAN_NAMES[wan]}`);
     if (!returnTraffic({ zone: "external", netId: null, clientId: null, ip: targetIp, label: "インターネット" })) return done(false, "戻りの通信がブロックされました。");
-    hops.push({ status: "ok", title: `NAT して ${WAN_NAMES[wan]} からインターネットへ`, detail: `送信元 IP を ${WAN_IPS[wan]} に変換します。` });
+    hops.push({ status: "ok", title: ipv6 ? `IPv6 を ${WAN_NAMES[wan]} から転送` : `NAT して ${WAN_NAMES[wan]} からインターネットへ`, detail: ipv6 ? `送信元 ${src.ip} を維持します。` : `送信元 IP を ${WAN_IPS[wan]} に変換します。` });
     const qos = wanBandwidth(s, wan, q.srcId);
     if (qos.backgroundFlows || s.qos?.some((rule) => rule.clientId === q.srcId))
       hops.push({ status: "info", title: `QoS · 優先度 ${QOS_LABELS[qos.priority]}`, detail: `WAN の推定配分 下り ${Math.round(qos.downloadMbps)} / 上り ${Math.round(qos.uploadMbps)} Mbps（競合フロー ${qos.backgroundFlows}）` });
@@ -975,6 +1079,16 @@ export function trace(s: Scenario, q: TraceQuery, states?: ReadonlyMap<string, C
     return done(false, "宛先に有効な IP アドレスがありません。");
   }
   const dstNet = dst.network;
+  if (dst.guestPortal) {
+    failAt = `c:${dst.client.id}`;
+    hops.push({ status: "fail", title: GUEST_PORTAL_REQUIRED, detail: dst.client.name });
+    return done(false, GUEST_PORTAL_REQUIRED);
+  }
+  const blocked = contentGate(dst.ip);
+  if (blocked) {
+    failAt = `c:${src.client.id}`;
+    return done(false, blocked.reason);
+  }
 
   if (dstNet.id === srcNet.id) {
     hops.push({

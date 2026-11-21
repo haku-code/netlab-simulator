@@ -22,6 +22,7 @@ const GROUPS = [
       { href: "/settings/policies", label: "ポリシー一覧", area: "firewall" },
       { href: "/settings/objects", label: "オブジェクト" },
       { href: "/settings/forwarding", label: "ポートフォワード" },
+      { href: "/settings/security", label: "セキュリティとコンテンツ" },
     ],
   },
 ];

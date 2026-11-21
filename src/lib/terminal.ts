@@ -1,4 +1,5 @@
-import { netInfo, pingLines } from "./emu";
+import { netInfo, pingLines, probe } from "./emu";
+import { useSecurityLog } from "./security-log";
 import { LESSONS, runChecks } from "./lessons";
 import { findDevice, findNetwork, findPort, resolveClient, trace } from "./net/simulate";
 import { validate } from "./net/validate";
@@ -133,7 +134,9 @@ export function runTerminalCommand(input: string, state: TerminalState): Result 
       if (command === "ping") {
         const host = destination ? resolveClient(s, destination.id).ip : second;
         if (!host) return error(`${second} に IP アドレスがありません。`);
-        return output(pingLines(s, client.id, host));
+        const result = probe(s, client.id, host, "icmp", null);
+        useSecurityLog.getState().record(client.name, result.security);
+        return output(pingLines(s, client.id, host, 4, result));
       }
       if (!destination && second !== "internet") return error(`宛先の端末が見つかりません: ${second}`);
       const protocol = third ?? "icmp";
@@ -143,6 +146,7 @@ export function runTerminalCommand(input: string, state: TerminalState): Result 
         return error("TCP / UDP には 1〜65535 のポート番号を指定してください。ICMP にポート指定は不要です。");
       }
       const result = trace(s, { srcId: client.id, dst: second, protocol, port });
+      useSecurityLog.getState().record(client.name, result.security);
       return output([
         result.summary,
         ...result.hops.map((hop) => `[${hop.status}] ${hop.title}${hop.detail ? ` — ${hop.detail}` : ""}`),

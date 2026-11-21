@@ -7,6 +7,8 @@ import { TraceDetails } from "./apps";
 
 /** ブラウザに表示するページ（エラーページ / 各機器の Web 画面 / インターネット） */
 export function SitePage({ result, url, host, port }: { result: ProbeResult; url: string; host: string; port: number }) {
+  const block = result.security?.find((decision) => decision.action === "block");
+  if (block) return <ErrorPage icon={Ban} title="接続がブロックされました" code={block.layer} body={block.destination} why={block.reason} />;
   if (result.status === "noip")
     return <ErrorPage icon={WifiOff} title="インターネットに接続されていません" code="ERR_INTERNET_DISCONNECTED" body="ネットワーク接続を確認してください。" why={result.message} />;
   if (result.status === "dns")
@@ -35,7 +37,7 @@ export function SitePage({ result, url, host, port }: { result: ProbeResult; url
     );
 
   const t = result.target;
-  if (t.kind === "internet") return <InternetSite host={host} />;
+  if (t.kind === "internet") return <InternetSite host={host} ipv6={t.ip.includes(":")} />;
   if (t.kind === "gateway") return <GatewayPage ip={t.ip} />;
   if (t.kind === "client") {
     const name = t.client.name;
@@ -62,12 +64,14 @@ function ErrorPage({ icon: Icon, title, code, body, why, hops }: { icon: LucideI
   );
 }
 
-function InternetSite({ host }: { host: string }) {
+function InternetSite({ host, ipv6 }: { host: string; ipv6: boolean }) {
   return (
     <div className="mx-auto max-w-xl px-8 py-10">
       <div className="mb-6 h-1.5 w-16 rounded-full bg-[#006fff]" />
       <h1 className="mb-3 text-[22px] font-semibold">{host}</h1>
-      <p className="mb-4 text-[13px] leading-relaxed text-black/70">インターネット上のサイトに接続できました。通信はゲートウェイで NAT され、WAN 側の IP アドレスから送信されています。</p>
+      <p className="mb-4 text-[13px] leading-relaxed text-black/70">{ipv6
+        ? "IPv6 でインターネット上のサイトに接続できました。ゲートウェイは送信元 IPv6 アドレスを維持して転送しています。"
+        : "インターネット上のサイトに接続できました。通信はゲートウェイで NAT され、WAN 側の IP アドレスから送信されています。"}</p>
       <div className="space-y-2">
         {[80, 64, 72].map((w, i) => (
           <div key={i} className="h-2.5 rounded bg-black/[0.06]" style={{ width: `${w}%` }} />

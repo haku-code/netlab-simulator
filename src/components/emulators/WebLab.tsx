@@ -4,26 +4,29 @@ import { useState } from "react";
 import type { Client, Scenario } from "@/lib/model";
 import { uid } from "@/lib/model";
 import type { ProbeResult } from "@/lib/emu";
+import type { IpFamily } from "@/lib/net/ipv6";
 import { useStore } from "@/lib/store";
 import { virtualWebCapture, type WebEvent } from "@/lib/web";
 
 type Transport = { scheme: "http" | "https"; port: number };
 const demo = { user: "member", password: "lab-demo" };
 
-export function WebCapture({ scenario, clientId, transport, result, problem, event }: {
+export function WebCapture({ scenario, clientId, transport, result, problem, event, family }: {
   scenario: Scenario;
   clientId: string;
   transport: Transport;
   result: ProbeResult;
   problem: string | null;
   event: WebEvent;
+  family?: IpFamily;
 }) {
-  const capture = virtualWebCapture(scenario, clientId, transport.scheme, transport.port, result, problem, event);
+  const capture = virtualWebCapture(scenario, clientId, transport.scheme, transport.port, result, problem, event, family);
   const target = "target" in result && "ip" in result.target ? result.target.ip : undefined;
+  const endpoint = target?.includes(":") ? `[${target}]` : target;
   return (
     <div className="space-y-3 text-[12px]">
       <p>NetLab の仮想パケット · アプリケーション欄には実習用のサンプル値を表示します。</p>
-      <p className="font-mono">{capture.ip ?? "—"} → {target ?? "—"}:{transport.port}</p>
+      <p className="font-mono">{capture.ip ?? "—"} → {endpoint ?? "—"}:{transport.port}</p>
       <dl className="grid gap-2.5">
         <div><dt className="font-semibold">TCP</dt><dd>{capture.transport.join(" → ") || "通信なし"}</dd></div>
         {transport.scheme === "https" && <div><dt className="font-semibold">TLS 1.3</dt><dd>{capture.handshake.join(" → ") || "ハンドシェイクなし"}</dd></div>}

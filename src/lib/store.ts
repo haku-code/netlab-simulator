@@ -5,7 +5,7 @@ import { persist } from "zustand/middleware";
 import { LESSONS } from "./lessons";
 import { isIPhone, type Client, type Scenario } from "./model";
 import { autoFloor } from "./floor";
-import { assignLeases } from "./net/simulate";
+import { assignLeases, resolveClient } from "./net/simulate";
 import { defaultScenario } from "./scenarios/default";
 import { rememberWifiPassword } from "./wifi";
 import { installDemoWebServers } from "./web";
@@ -27,6 +27,7 @@ interface State {
   renewLease: (clientId: string) => void;
   joinWifi: (clientId: string, ssidId: string, password: string, identity?: string) => void;
   disconnectWifi: (clientId: string) => void;
+  signInGuest: (clientId: string, password: string) => boolean;
   /** LAN ケーブルを挿す / 抜く（port が null なら抜く） */
   plugCable: (clientId: string, deviceId: string | null, portId: string | null) => void;
   resetScenario: () => void;
@@ -75,6 +76,7 @@ export const useStore = create<State>()(
             c.connection = { type: "wifi", apId, ssidId };
             c.wifiPassword = password;
             c.wifiIdentity = identity;
+            c.guestPortalSession = undefined;
             rememberWifiPassword(s, c);
             c.lease = null;
           }),
@@ -84,14 +86,25 @@ export const useStore = create<State>()(
             if (c.connection.type === "wifi") c.connection = { ...c.connection, ssidId: null };
             c.wifiPassword = "";
             c.wifiIdentity = undefined;
+            c.guestPortalSession = undefined;
             c.lease = null;
           }),
+        signInGuest: (id, password) => {
+          const s = get().scenario;
+          if (!s.clients.some((c) => c.id === id)) return false;
+          const state = resolveClient(s, id);
+          const portal = state.guestPortal?.captivePortal;
+          if (state.error || !state.ip || !state.toGateway?.ok || !portal?.password || portal.password !== password) return false;
+          mutateClient(id, (c) => (c.guestPortalSession = portal.id));
+          return true;
+        },
         plugCable: (id, deviceId, portId) =>
           mutateClient(id, (c, s) => {
             rememberWifiPassword(s, c);
             c.connection = { type: "wired", deviceId, portId };
             c.wifiPassword = "";
             c.wifiIdentity = undefined;
+            c.guestPortalSession = undefined;
             c.lease = null;
           }),
         resetScenario: () => {

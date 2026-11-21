@@ -2,7 +2,7 @@ import type { Client, Scenario, WifiSsid } from "./model";
 
 type Mode = {
   label: string;
-  auth: "none" | "shared" | "enterprise" | "certificate";
+  auth: "none" | "shared" | "ppsk" | "enterprise" | "certificate";
   radio: "open" | "legacy" | "protected";
   requiresWpa3?: true;
   protection: string;
@@ -19,6 +19,7 @@ export const WIFI_SECURITY = {
   wep: { label: "WEP", auth: "shared", radio: "legacy", protection: "古い共有キーで無線フレームを暗号化します。", risk: legacyRisk },
   wpa: { label: "WPA-Personal（TKIP）", auth: "shared", radio: "legacy", protection: "共有パスワードと TKIP を使います。", risk: legacyRisk },
   wpa2: { label: "WPA2-Personal（AES）", auth: "shared", radio: "protected", protection: "共有パスワードと AES-CCMP で無線区間を保護します。", risk: "オフラインでのパスワード推測に備え、長く推測されにくいパスワードを使います。" },
+  ppsk: { label: "WPA2-Personal（PPSK）", auth: "ppsk", radio: "protected", protection: "端末ごとに発行したパスワードと AES-CCMP を使います。", risk: "端末を廃止するときは、その端末のパスワードを削除します。" },
   "wpa2-tkip": { label: "WPA2-Personal（TKIP・旧互換）", auth: "shared", radio: "legacy", protection: "共有パスワードと旧互換の TKIP を使います。", risk: legacyRisk },
   wpa3: { label: "WPA3-Personal", auth: "shared", radio: "protected", requiresWpa3: true, protection: "SAE と管理フレーム保護（PMF）を使います。SAE はオフラインでのパスワード推測に強い方式です。", risk: sharedRisk },
   "wpa-wpa2": { label: "WPA/WPA2-Personal 移行", auth: "shared", radio: "protected", protection: "WPA2 対応端末は AES-CCMP を使います。", risk: "WPA 側の接続には TKIP の弱点が残ります。" },
@@ -39,15 +40,30 @@ export function wifiMode(security: WifiSecurity): Mode {
   return WIFI_SECURITY[security];
 }
 
-export function wifiCredentialsMatch(ssid: WifiSsid, client: Client) {
+export function wifiAuthError(ssid: WifiSsid, client: Client): string | null {
+  const { radius } = ssid;
   switch (wifiMode(ssid.security).auth) {
-    case "none": return true;
-    case "certificate": return client.wifiCertificate === true;
-    case "enterprise":
-      return client.wifiIdentity === (ssid.enterpriseIdentity || DEFAULT_ENTERPRISE_USER)
-        && Boolean(ssid.password) && client.wifiPassword === ssid.password;
-    case "shared": return Boolean(ssid.password) && client.wifiPassword === ssid.password;
+    case "none": return null;
+    case "certificate":
+      if (radius && !radius.online) return "RADIUS サーバーが応答しません";
+      return client.wifiCertificate ? null : "実習用の端末証明書が登録されていません";
+    case "enterprise": {
+      if (radius && !radius.online) return "RADIUS サーバーが応答しません";
+      const users = radius?.users ?? [{ identity: ssid.enterpriseIdentity || DEFAULT_ENTERPRISE_USER, password: ssid.password }];
+      const accepted = users.some((user) => user.identity !== "" && user.identity === client.wifiIdentity
+        && user.password !== "" && user.password === client.wifiPassword);
+      return accepted ? null : "ユーザー名またはパスワードを確認してください";
+    }
+    case "ppsk": {
+      const key = ssid.ppsk && Object.hasOwn(ssid.ppsk, client.id) ? ssid.ppsk[client.id] : undefined;
+      return key && key === client.wifiPassword ? null : "この端末に割り当てられたパスワードを確認してください";
+    }
+    case "shared": return ssid.password && client.wifiPassword === ssid.password ? null : "パスワードが違います";
   }
+}
+
+export function wifiCredentialsMatch(ssid: WifiSsid, client: Client) {
+  return wifiAuthError(ssid, client) === null;
 }
 
 export function negotiatedWifiSecurity(security: WifiSecurity, client: Client): WifiSecurity {

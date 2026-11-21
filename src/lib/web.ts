@@ -1,6 +1,7 @@
 import type { Client, Device, Scenario, WebService } from "./model";
 import type { ProbeResult } from "./emu";
-import { resolveClient } from "./net/simulate";
+import { ipv6ClientState, resolveClient } from "./net/simulate";
+import { parseIpv6, type IpFamily } from "./net/ipv6";
 import { wired } from "./scenarios/builders";
 import { portBusy } from "./topo";
 import { clientWifiMode } from "./wifi-security";
@@ -54,8 +55,11 @@ export function virtualWebCapture(
   result: ProbeResult,
   tlsError: string | null,
   event: WebEvent,
+  family?: IpFamily,
 ) {
-  const { client, ip, attachDeviceId } = resolveClient(s, clientId);
+  const state = resolveClient(s, clientId);
+  const ipv6 = family === "ipv6" || ("target" in result && parseIpv6(result.target.ip) !== null);
+  const { client, ip, attachDeviceId } = ipv6 ? ipv6ClientState(state) : state;
   const radio = attachDeviceId ? clientWifiMode(s, client) : undefined;
   const transport = result.status === "ok" ? ["SYN", "SYN-ACK", "ACK"]
     : result.status === "refused" ? ["SYN", "RST"]

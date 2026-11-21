@@ -1,6 +1,7 @@
 // mDNS (Bonjour) によるサービス探索のシミュレーション
 import type { Client, ClientKind, Scenario } from "./model";
 import { findNetwork, l2Path, resolveClient } from "./net/simulate";
+import { GUEST_PORTAL_REQUIRED } from "./wifi";
 
 export interface Service {
   type: string;
@@ -40,6 +41,11 @@ export function discover(s: Scenario, srcId: string, types: string[]): Discovery
       if (!types.includes(service.type)) continue;
       const dst = resolveClient(s, c.id);
       const push = (visible: boolean, reason: string) => out.push({ client: c, service, visible, reason, ip: dst.ip });
+
+      if (src.guestPortal || dst.guestPortal) {
+        push(false, GUEST_PORTAL_REQUIRED);
+        continue;
+      }
 
       if (src.error || !src.network) {
         push(false, "この端末がネットワークに接続されていないため、探索パケットを送れません。");

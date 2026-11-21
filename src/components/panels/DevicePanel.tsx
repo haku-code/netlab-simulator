@@ -10,6 +10,7 @@ import Link from "next/link";
 import { findNetwork } from "@/lib/net/simulate";
 import { DEVICE_TYPE_LABEL, DeviceGlyph } from "../icons";
 import { PortFaceplate } from "../PortFaceplate";
+import { ApRadioSettings } from "../wifi/ApRadioSettings";
 import { Button, Field, Input, KV, Segmented, SidePanel, Status, Tabs, Toggle, useDraft } from "../ui";
 
 type Tab = "overview" | "ports" | "wifi" | "settings";
@@ -155,6 +156,7 @@ export function ApWifi({ apId }: { apId: string }) {
           で設定します。
         </p>
       </div>
+      <ApRadioSettings s={s} ap={ap} />
       <Field label="送信出力" hint="下げると電波の届く範囲が狭くなります。フロアプランのヒートマップで確認できます。">
         <Segmented<"high" | "medium" | "low">
           value={ap.txPower ?? "high"}

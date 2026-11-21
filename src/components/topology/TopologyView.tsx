@@ -8,6 +8,7 @@ import { useMemo, useRef, useState } from "react";
 import { useClientStates } from "@/lib/hooks";
 import { type ClientKind, type DeviceType, type Scenario } from "@/lib/model";
 import { findGateway, type Segment } from "@/lib/net/simulate";
+import { meshEdgeId, meshParent } from "@/lib/net/wifi-radio";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
 import { ClientIcon, DeviceGlyph } from "../icons";
@@ -225,6 +226,13 @@ function layout(s: Scenario, parents: ReadonlyMap<string, string>) {
       child.linkId = l.id;
       node.children.push(child);
     }
+    for (const ap of s.devices) {
+      if (visited.has(ap.id) || meshParent(s, ap)?.id !== devId) continue;
+      visited.add(ap.id);
+      const child = build(ap.id);
+      child.linkId = meshEdgeId(ap.id);
+      node.children.push(child);
+    }
     for (const c of s.clients) {
       const at = parents.get(c.id);
       if (at === devId) node.children.push({ id: c.id, kind: "client", children: [], width: CLI_W });
@@ -366,6 +374,16 @@ export function TopologyView({
         type: "smoothstep",
         animated: !!on,
         style: { ...stroke(on), strokeDasharray: c.connection.type === "wifi" ? "3 3" : undefined },
+      });
+    }
+    for (const ap of s.devices) {
+      const parent = meshParent(s, ap);
+      if (!parent) continue;
+      const id = meshEdgeId(ap.id);
+      const on = highlight?.linkIds.includes(id);
+      edges.push({
+        id, source: parent.id, target: ap.id, type: "smoothstep",
+        selectable: false, focusable: false, style: { ...stroke(on), strokeDasharray: "5 4" },
       });
     }
     // パケットの区間をエッジに割り当てる（往復で同じエッジを通ることもある）

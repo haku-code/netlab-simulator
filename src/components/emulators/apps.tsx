@@ -7,15 +7,18 @@ import { netInfo, parseUrl, pingLines, probe, tracerouteLines, type ProbeResult 
 import { discover } from "@/lib/mdns";
 import { useRouter } from "next/navigation";
 import { CONNECT_DBM, VISIBLE_DBM } from "@/lib/floor";
-import { associate, broadcasts, clientBands, isPositional, radioLink, resolveClient, wifiLink } from "@/lib/net/simulate";
+import { associate, broadcasts, clientBands, isPositional, radioLink, resolveClient, uplinkOf } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
 import { usePcCapture } from "@/lib/pc-capture";
 import { browserPackets, pingPackets } from "@/lib/pc-packets";
+import { useSecurityLog } from "@/lib/security-log";
+import type { IpFamily } from "@/lib/net/ipv6";
 import { savedWifiPassword } from "@/lib/wifi";
 import { wifiMode } from "@/lib/wifi-security";
 import { TraceView } from "../TraceView";
 import { SitePage } from "./sites";
 import { WebCapture, WebLabSite } from "./WebLab";
+import { GuestPortal } from "./GuestPortal";
 import { webError, type WebEvent } from "@/lib/web";
 
 export function useEmu(clientId: string) {
@@ -113,6 +116,10 @@ export function NetworkSettings({ clientId, dark }: { clientId: string; dark?: b
           <span className={label}>サブネットマスク</span>
           <span>{noDhcp ? "255.255.0.0" : (info.mask ?? "—")}</span>
         </div>
+        {info.ipv6 && <div className={row}>
+          <span className={label}>IPv6 (SLAAC)</span>
+          <span className="break-all text-right">{info.ipv6}</span>
+        </div>}
         <div className={row}>
           <span className={label}>ルーター</span>
           <span>{info.router ?? "—"}</span>
@@ -192,9 +199,11 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
   const router = useRouter();
   const positional = isPositional(s, client);
   const apId = client.connection.type === "wifi" ? client.connection.apId : s.devices.find((d) => d.type === "ap")?.id;
+  const nearbyAp = s.devices.find((d) => d.id === apId && d.type === "ap");
   // フロアプランあり: その場所で電波が届く SSID だけが見える（最も強い AP の値）
   // なし: 近くの AP が配信していて、対応している周波数帯の SSID だけが見える
-  const onAir = positional ? s.ssids : apId ? s.ssids.filter((w) => broadcasts(w, apId)) : [];
+  const onAir = positional ? s.ssids : nearbyAp && (!nearbyAp.meshParentId || uplinkOf(s, nearbyAp.id).online)
+    ? s.ssids.filter((w) => broadcasts(w, nearbyAp.id)) : [];
   const visible = onAir.flatMap((w) => {
     if (positional) {
       const as = associate(s, client, w);
@@ -203,7 +212,7 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
       const link = radioLink(s, client, w, best.ap.id);
       return link ? [{ w, link, weak: best.rssi < CONNECT_DBM }] : [];
     }
-    const link = apId ? wifiLink(client, w, apId) : null;
+    const link = apId ? radioLink(s, client, w, apId) : null;
     return link ? [{ w, link, weak: false }] : [];
   });
   const hidden = positional ? 0 : onAir.length - visible.length;
@@ -218,8 +227,8 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
           const password = savedWifiPassword(client, w.id);
           const { auth, radio } = wifiMode(w.security);
           const savedIdentity = client.wifiIdentities?.[w.id];
-          const hasCredentials = password !== undefined && (auth === "shared" || (auth === "enterprise" && !!savedIdentity));
-          const retry = selected && info.st.wifiAuthFailed && (auth === "shared" || auth === "enterprise");
+          const hasCredentials = password !== undefined && (auth === "shared" || auth === "ppsk" || (auth === "enterprise" && !!savedIdentity));
+          const retry = selected && info.st.wifiAuthFailed && (auth === "shared" || auth === "ppsk" || auth === "enterprise");
           return (
             <li key={w.id}>
               <button
@@ -279,6 +288,7 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
           );
         })}
       </ul>
+      {info.st.guestPortal && <GuestPortal key={info.st.guestPortal.captivePortal?.id} clientId={clientId} ssid={info.st.guestPortal} reachable={!info.st.error && !!info.st.toGateway?.ok} />}
       {connectionError && <p className="text-[12px] text-err">{connectionError}</p>}
       {hidden > 0 && (
         <p className="text-[11.5px] opacity-60">
@@ -304,27 +314,31 @@ export function WifiList({ clientId, dark }: { clientId: string; dark?: boolean 
 
 export function Browser({ clientId, home = "", compact }: { clientId: string; home?: string; compact?: boolean }) {
   const s = useStore((x) => x.scenario);
+  const st = useMemo(() => resolveClient(s, clientId), [s, clientId]);
   const [input, setInput] = useState(home);
   const [url, setUrl] = useState<string | null>(home || null);
   const [tick, setTick] = useState(0);
+  const [family, setFamily] = useState<IpFamily>("ipv4");
   const [captureOpen, setCaptureOpen] = useState(false);
   const [traffic, setTraffic] = useState<WebEvent>({ method: "GET", path: "/", status: "200 OK" });
   const parsed = url ? parseUrl(url) : null;
-  const recordTraffic = (address: string, event: WebEvent, newConnection: boolean) => {
+  const recordTraffic = (address: string, event: WebEvent, newConnection: boolean, ipFamily = family) => {
     setTraffic(event);
-    usePcCapture.getState().record(clientId, () => browserPackets(s, clientId, address, event, newConnection), s);
+    usePcCapture.getState().record(clientId, () => browserPackets(s, clientId, address, event, newConnection, ipFamily), s);
   };
-  const navigate = (address: string) => {
+  const navigate = (address: string, ipFamily = family) => {
     setInput(address);
     setUrl(address);
-    recordTraffic(address, { method: "GET", path: "/", status: "200 OK" }, true);
+    const target = parseUrl(address);
+    if (target) useSecurityLog.getState().record(st.client.name, probe(s, clientId, target.host, "tcp", target.port, ipFamily).security);
+    recordTraffic(address, { method: "GET", path: "/", status: "200 OK" }, true, ipFamily);
     setTick((t) => t + 1);
   };
   // 設定が変わると結果も変わる（再読み込みしなくても反映）
   const result = useMemo<ProbeResult | null>(
-    () => (parsed ? probe(s, clientId, parsed.host, "tcp", parsed.port) : null),
+    () => (parsed ? probe(s, clientId, parsed.host, "tcp", parsed.port, family) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [s, clientId, url, tick],
+    [s, clientId, url, tick, family],
   );
 
   const server = result && "target" in result && result.target.kind === "client" && result.target.client.kind === "server"
@@ -355,20 +369,33 @@ export function Browser({ clientId, home = "", compact }: { clientId: string; ho
         <button className="rounded p-1 text-black/50 hover:bg-black/5" aria-label="移動">
           <ArrowRight size={14} />
         </button>
+        <select aria-label="ブラウザの IP バージョン" className="rounded border border-black/10 bg-white px-1 py-1 text-[11px]" value={family}
+          onChange={(event) => {
+            const value = event.target.value as IpFamily;
+            setFamily(value);
+            if (url) navigate(url, value);
+          }}>
+          <option value="ipv4">IPv4</option>
+          <option value="ipv6">IPv6</option>
+        </select>
       </form>
-      {parsed && result && (
+      {!st.guestPortal && parsed && result && (
         <div className="flex flex-wrap items-center justify-between gap-1 border-b border-black/10 px-2.5 py-1 text-[11px]">
           <span>{parsed.scheme === "https" ? (result.status === "ok" && !problem ? "HTTPS · TLS" : "HTTPS") : "HTTP · 平文"}</span>
           <button type="button" aria-expanded={captureOpen} onClick={() => setCaptureOpen(!captureOpen)} className="font-medium text-[#075aaa] underline">通信キャプチャ</button>
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {captureOpen && parsed && result && (
+        {!st.guestPortal && captureOpen && parsed && result && (
           <div className="border-b border-black/10 bg-[#eef4fa] p-3">
-            <WebCapture scenario={s} clientId={clientId} transport={parsed} result={result} problem={problem} event={traffic} />
+            <WebCapture scenario={s} clientId={clientId} transport={parsed} result={result} problem={problem} event={traffic} family={family} />
           </div>
         )}
-        {!parsed || !result ? (
+        {st.guestPortal ? (
+          <div className="mx-auto max-w-sm p-4">
+            <GuestPortal key={st.guestPortal.captivePortal?.id} clientId={clientId} ssid={st.guestPortal} reachable={!st.error && !!st.toGateway?.ok} />
+          </div>
+        ) : !parsed || !result ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-[12.5px] text-black/50">
             <p>アドレスを入力してください。</p>
             {labServers.map((c) => (
@@ -400,15 +427,18 @@ export function NetUtility({ clientId, dark }: { clientId: string; dark?: boolea
   const s = useStore((x) => x.scenario);
   const [tool, setTool] = useState<"ping" | "traceroute">("ping");
   const [host, setHost] = useState("");
+  const [family, setFamily] = useState<IpFamily>("ipv4");
   const [out, setOut] = useState<string[]>([]);
   const run = () => {
     const target = host.trim();
     if (!target) return;
+    const result = probe(s, clientId, target, "icmp", null, family);
+    useSecurityLog.getState().record(s.clients.find((client) => client.id === clientId)?.name ?? clientId, result.security);
     if (tool === "ping") {
-      setOut(pingLines(s, clientId, target));
-      usePcCapture.getState().record(clientId, () => pingPackets(s, clientId, target), s);
+      setOut(pingLines(s, clientId, target, 4, result));
+      usePcCapture.getState().record(clientId, () => pingPackets(s, clientId, target, family), s);
     } else {
-      setOut(tracerouteLines(s, clientId, target));
+      setOut(tracerouteLines(s, clientId, target, result));
     }
   };
   return (
@@ -423,6 +453,11 @@ export function NetUtility({ clientId, dark }: { clientId: string; dark?: boolea
             {t === "ping" ? "Ping" : "Traceroute"}
           </button>
         ))}
+        <select aria-label="診断の IP バージョン" value={family} onChange={(event) => setFamily(event.target.value as IpFamily)}
+          className={clsx("rounded px-2 text-[12px]", dark ? "bg-white/10" : "bg-surface-2")}>
+          <option value="ipv4">IPv4</option>
+          <option value="ipv6">IPv6</option>
+        </select>
       </div>
       <form
         className="flex gap-2"

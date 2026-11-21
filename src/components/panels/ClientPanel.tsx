@@ -5,6 +5,7 @@ import { useClientStates } from "@/lib/hooks";
 import type { Client, ClientKind } from "@/lib/model";
 import Link from "next/link";
 import { netInfo } from "@/lib/emu";
+import { ipv6ClientState } from "@/lib/net/simulate";
 import { ipToStr, parseIp } from "@/lib/net/ip";
 import { roomAt } from "@/lib/floor";
 import { useStore } from "@/lib/store";
@@ -99,6 +100,7 @@ export function ClientPanel({ clientId, onClose }: { clientId: string | null; on
               ["ネットワーク", st.network ? `${st.network.name}` : "—"],
               ["VLAN", st.network ? String(st.network.vlanId) : "—"],
               ["IP アドレス", <span key="ip" className="tnum">{st.ip ?? "—"}{client.ipMode === "static" && <span className="ml-1.5 text-muted">（固定）</span>}</span>],
+              ...(st.network?.ipv6Prefix ? [["IPv6 (SLAAC)", ipv6ClientState(st).ip ?? "—"] as [string, string]] : []),
               ["DHCP Lease", client.ipMode === "static" ? "—" : client.lease ? (st.staleLease ? <span key="l" className="text-err">古いリース</span> : "有効") : "なし"],
               ["MAC アドレス", <span key="mac" className="tnum">{client.mac}</span>],
               ["メーカー", client.vendor],

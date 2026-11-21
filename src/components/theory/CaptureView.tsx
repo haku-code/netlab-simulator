@@ -1,6 +1,7 @@
 "use client";
 
 import clsx from "clsx";
+import { parseIpv6 } from "@/lib/net/ipv6";
 import { useEffect, useState } from "react";
 import type { Frame } from "@/lib/capture";
 
@@ -19,6 +20,7 @@ export function CaptureView({ frames, wirelessTools = false }: { frames: Frame[]
   }, [frames, observing]);
   if (!frames.length) return <p className="px-4 py-6 text-center text-muted">送信元が IP を持っていないため、パケットを送れません。</p>;
   const f = shown[Math.min(sel, shown.length - 1)];
+  const ipv6 = f.protocol === "ICMPv6" || parseIpv6(f.ipSrc ?? "") !== null;
   const encrypted = observing && f.wifi?.radio === "protected";
   const c = (k: keyof Frame) => f.changed.includes(k);
 
@@ -34,7 +36,7 @@ export function CaptureView({ frames, wirelessTools = false }: { frames: Frame[]
         <table className="tnum w-full font-mono text-[11.5px]">
           <thead>
             <tr className="text-left text-muted">
-              {["No.", "区間", "送信元 MAC", "宛先 MAC", "VLAN", "送信元 IP", "宛先 IP", "TTL", "プロトコル", "概要"].map((h) => (
+              {["No.", "区間", "送信元 MAC", "宛先 MAC", "VLAN", "送信元 IP", "宛先 IP", frames.some((frame) => frame.protocol === "ICMPv6") ? "Hop Limit" : "TTL", "プロトコル", "概要"].map((h) => (
                 <th key={h} className="border-b border-line px-2 py-1.5 font-sans text-[11px] font-medium whitespace-nowrap">
                   {h}
                 </th>
@@ -77,7 +79,7 @@ export function CaptureView({ frames, wirelessTools = false }: { frames: Frame[]
           <span className="size-2.5 rounded-sm bg-warn/30" /> 前のフレームから変わった値
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="size-2.5 rounded-sm bg-[#e9dcff]" /> ARP
+          <span className="size-2.5 rounded-sm bg-[#e9dcff]" /> {frames.some((frame) => frame.protocol === "ICMPv6") ? "NDP" : "ARP"}
         </span>
       </div>
 
@@ -97,27 +99,29 @@ export function CaptureView({ frames, wirelessTools = false }: { frames: Frame[]
           </Layer>
         )}
         {encrypted ? <div className="mt-1">フレーム本体は暗号化されています。</div> : f.kind !== "data" ? (
-          <Layer title="ARP（アドレス解決プロトコル）">
-            <Field k="操作コード" v={f.kind === "arp-request" ? "要求 (1)" : "応答 (2)"} />
+          <Layer title={ipv6 ? "NDP（近隣探索）" : "ARP（アドレス解決プロトコル）"}>
+            <Field k={ipv6 ? "ICMPv6 タイプ" : "操作コード"} v={ipv6
+              ? f.kind === "neighbor-solicitation" ? "135 · Neighbor Solicitation" : "136 · Neighbor Advertisement"
+              : f.kind === "arp-request" ? "要求 (1)" : "応答 (2)"} />
             <Field k="" v={f.info} />
           </Layer>
         ) : (
           <>
-            <Layer title="IPv4（インターネットプロトコル）">
+            <Layer title={ipv6 ? "IPv6（インターネットプロトコル）" : "IPv4（インターネットプロトコル）"}>
               <Field k="送信元" v={f.ipSrc ?? ""} hl={c("ipSrc")} />
               <Field k="宛先" v={f.ipDst ?? ""} hl={c("ipDst")} />
-              <Field k="TTL（生存時間）" v={String(f.ttl)} hl={c("ttl")} />
+              <Field k={ipv6 ? "Hop Limit" : "TTL（生存時間）"} v={String(f.ttl)} hl={c("ttl")} />
               <Field k="プロトコル" v={f.protocol} />
             </Layer>
-            {f.protocol !== "ICMP" ? (
+            {f.protocol === "TCP" || f.protocol === "UDP" ? (
               <Layer title={f.protocol === "TCP" ? "TCP（伝送制御プロトコル）" : "UDP（ユーザーデータグラムプロトコル）"}>
                 <Field k="送信元ポート" v={String(f.srcPort)} />
                 <Field k="宛先ポート" v={String(f.dstPort)} />
                 {f.protocol === "TCP" && <Field k="フラグ" v="SYN" />}
               </Layer>
             ) : (
-              <Layer title="ICMP（インターネット制御メッセージプロトコル）">
-                <Field k="種類" v="8（エコー要求 / ping）" />
+              <Layer title={ipv6 ? "ICMPv6" : "ICMP（インターネット制御メッセージプロトコル）"}>
+                <Field k="種類" v={ipv6 ? "128（エコー要求 / ping）" : "8（エコー要求 / ping）"} />
               </Layer>
             )}
           </>

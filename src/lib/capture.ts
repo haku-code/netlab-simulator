@@ -1,16 +1,23 @@
 // Trace 結果から、区間ごとのフレーム（Wireshark 風のキャプチャ）を組み立てる
 import { EXTERNAL_TEST_IP, INTERNET_IP, WAN_IPS } from "./net/gateway";
 import type { Protocol, Scenario } from "./model";
-import { findGateway, resolveClient, type TraceQuery, type TraceResult } from "./net/simulate";
-import { clientWifiMode } from "./wifi-security";
+import { findGateway, ipv6ClientState, resolveClient, type TraceQuery, type TraceResult } from "./net/simulate";
+import { INTERNET_IP6, ipv6Gateway, parseIpv6 } from "./net/ipv6";
+import { isMeshEdge } from "./net/wifi-radio";
+import { clientWifiMode, wifiMode } from "./wifi-security";
 
 export const BROADCAST = "ff:ff:ff:ff:ff:ff";
 export { INTERNET_IP } from "./net/gateway";
 const ISP_MAC = "00:00:5e:00:01:01";
+const meshWifi = { ...wifiMode("wpa2"), label: "メッシュバックホール" };
+
+function frameWifi(edge: string, clientMode: Frame["wifi"]): Frame["wifi"] {
+  return isMeshEdge(edge) ? meshWifi : clientMode;
+}
 
 export interface Frame {
   no: number;
-  kind: "arp-request" | "arp-reply" | "data";
+  kind: "arp-request" | "arp-reply" | "neighbor-solicitation" | "neighbor-advertisement" | "data";
   /** 区間（ノード名） */
   from: string;
   to: string;
@@ -22,7 +29,7 @@ export interface Frame {
   ipSrc?: string;
   ipDst?: string;
   ttl?: number;
-  protocol: "ARP" | "ICMP" | "TCP" | "UDP";
+  protocol: "ARP" | "ICMP" | "ICMPv6" | "TCP" | "UDP";
   srcPort?: number;
   dstPort?: number;
   info: string;
@@ -35,6 +42,12 @@ export interface Frame {
 
 const gwMac = (s: Scenario) => findGateway(s)?.mac ?? "00:00:00:00:00:01";
 const wanMac = (mac: string) => mac.replace(/..$/, (h) => ((parseInt(h, 16) + 1) % 256).toString(16).padStart(2, "0"));
+
+function solicitedNodeMac(address: string | undefined) {
+  const low = Number((parseIpv6(address ?? "") ?? BigInt(0)) & BigInt(0xffffff));
+  const bytes = [low >> 16, (low >> 8) & 255, low & 255];
+  return ["33", "33", "ff", ...bytes.map((byte) => byte.toString(16).padStart(2, "0"))].join(":");
+}
 
 export function ephemeralPort(seed: string) {
   let h = 0;
@@ -50,19 +63,24 @@ export function nodeName(s: Scenario, id: string) {
 
 export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[] {
   if (q.srcId === "internet") return buildInboundCapture(s, q, r);
-  const src = resolveClient(s, q.srcId);
-  if (!src.ip || !src.network || src.error) return [];
+  const ipv6 = q.family === "ipv6" || parseIpv6(q.dstIp ?? "") !== null;
+  const stateOf = (id: string) => {
+    const state = resolveClient(s, id);
+    return ipv6 ? ipv6ClientState(state) : state;
+  };
+  const src = stateOf(q.srcId);
+  if (!src.ip || !src.network || src.error || src.guestPortal) return [];
   const gw = findGateway(s);
   const gwId = gw?.id;
   const route = r.route;
   const dstId = route?.kind === "static" ? route.nextHopId : q.dst !== "internet" ? q.dst : !route ? r.clientIds[1] : undefined;
-  const dst = dstId ? resolveClient(s, dstId) : null;
+  const dst = dstId ? stateOf(dstId) : null;
   const srcWifi = clientWifiMode(s, src.client);
   const dstWifi = dst ? clientWifiMode(s, dst.client) : undefined;
-  const dstIp = route && route.kind !== "forward" ? route.targetIp : q.dstIp ?? (q.dst === "internet" ? INTERNET_IP : dst?.ip);
+  const dstIp = route && route.kind !== "forward" ? route.targetIp : q.dstIp ?? (q.dst === "internet" ? (ipv6 ? INTERNET_IP6 : INTERNET_IP) : dst?.ip);
   if (!dstIp) return [];
   const sameNet = route?.kind !== "static" && dst?.network?.id === src.network.id;
-  const proto: Frame["protocol"] = q.protocol === "icmp" ? "ICMP" : q.protocol === "tcp" ? "TCP" : "UDP";
+  const proto: Frame["protocol"] = q.protocol === "icmp" ? (ipv6 ? "ICMPv6" : "ICMP") : q.protocol === "tcp" ? "TCP" : "UDP";
   const sport = q.protocol === "icmp" ? undefined : ephemeralPort(q.srcId + q.dst);
   const dport = q.protocol === "icmp" ? undefined : (q.port ?? undefined);
   const info = (p: Protocol) =>
@@ -81,31 +99,34 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
   const routerIdx = segs.findIndex((x) => x.from === gwId);
   const firstLeg = routerIdx >= 0 ? segs.slice(0, routerIdx) : segs;
   const secondLeg = routerIdx >= 0 ? segs.slice(routerIdx) : [];
-  const nextHopIp = sameNet ? dstIp : src.network.gatewayIp;
+  const gatewayIp = (network: NonNullable<typeof src.network>) => ipv6 ? ipv6Gateway(network) : network.gatewayIp;
+  const nextHopIp = sameNet ? dstIp : gatewayIp(src.network);
+  const requestKind = ipv6 ? "neighbor-solicitation" : "arp-request";
+  const replyKind = ipv6 ? "neighbor-advertisement" : "arp-reply";
+  const discovery = ipv6 ? "ICMPv6" : "ARP";
   const nextHopMac = sameNet ? dst!.client.mac : gwMac(s);
   const firstVlan = firstLeg.find((x) => x.vlan !== null)?.vlan ?? null;
 
-  // 1) 送信元の ARP: 同じサブネットなら宛先、違えばゲートウェイの MAC を調べる
-  // 同じサブネットで失敗した場合（L2 不通 / 無線分離）は ARP も返ってこない
-  const arpOk = sameNet ? r.ok : !!src.toGateway?.ok;
+  // 1) ARP / NDP: 同じサブネットなら宛先、別のサブネットならゲートウェイの MAC を調べる
+  const neighborReached = sameNet ? r.ok : !!src.toGateway?.ok;
   push({
-    kind: "arp-request",
+    kind: requestKind,
     from: nodeName(s, `c:${src.client.id}`),
-    to: "ブロードキャスト",
+    to: ipv6 ? "近隣探索マルチキャスト" : "ブロードキャスト",
     medium: firstLeg[0]?.medium ?? "ethernet",
     wifi: srcWifi,
     ethSrc: src.client.mac,
-    ethDst: BROADCAST,
+    ethDst: ipv6 ? solicitedNodeMac(nextHopIp) : BROADCAST,
     vlan: firstVlan,
-    protocol: "ARP",
-    info: `${nextHopIp} の MAC アドレスを ${src.ip} に通知してください`,
+    protocol: discovery,
+    info: ipv6 ? `Neighbor Solicitation · ${nextHopIp}` : `${nextHopIp} の MAC アドレスを ${src.ip} に通知してください`,
     note: sameNet
-      ? "宛先は同じサブネットなので、宛先そのものの MAC アドレスを ARP で調べます。"
+      ? `宛先は同じサブネットなので、宛先の MAC アドレスを ${ipv6 ? "NDP" : "ARP"} で調べます。`
       : `宛先 ${dstIp} は別のサブネットなので、デフォルトゲートウェイ ${nextHopIp} の MAC アドレスを調べます。`,
   });
-  if (arpOk) {
+  if (neighborReached) {
     push({
-      kind: "arp-reply",
+      kind: replyKind,
       from: sameNet ? nodeName(s, `c:${dst!.client.id}`) : nodeName(s, gwId ?? ""),
       to: nodeName(s, `c:${src.client.id}`),
       medium: firstLeg[0]?.medium ?? "ethernet",
@@ -113,21 +134,21 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       ethSrc: nextHopMac,
       ethDst: src.client.mac,
       vlan: firstVlan,
-      protocol: "ARP",
-      info: `${nextHopIp} の MAC アドレスは ${nextHopMac}`,
+      protocol: discovery,
+      info: ipv6 ? `Neighbor Advertisement · ${nextHopIp}` : `${nextHopIp} の MAC アドレスは ${nextHopMac}`,
     });
   } else {
     push({
-      kind: "arp-reply",
+      kind: replyKind,
       from: "—",
       to: nodeName(s, `c:${src.client.id}`),
       medium: "ethernet",
       ethSrc: "—",
       ethDst: "—",
       vlan: null,
-      protocol: "ARP",
+      protocol: discovery,
       info: "応答なし",
-      dropped: "ARP の応答が返ってきません（L2 で届いていない）。",
+      dropped: `${ipv6 ? "NDP" : "ARP"} の応答が返ってきません。`,
     });
   }
 
@@ -138,7 +159,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       from: nodeName(s, seg.from),
       to: nodeName(s, seg.to),
       medium: seg.medium,
-      wifi: seg.medium === "wifi" ? (seg.from === `c:${q.srcId}` ? srcWifi : dstWifi) : undefined,
+      wifi: seg.medium === "wifi" ? frameWifi(seg.edge, seg.from === `c:${q.srcId}` ? srcWifi : dstWifi) : undefined,
       ethSrc: src.client.mac,
       ethDst: nextHopMac,
       vlan: seg.vlan,
@@ -160,27 +181,27 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
       const address = dst.ip ?? dstIp;
       const dstVlan = secondLeg.find((x) => x.vlan !== null)?.vlan ?? null;
       push({
-        kind: "arp-request",
+        kind: requestKind,
         from: nodeName(s, gwId!),
-        to: "ブロードキャスト",
+        to: ipv6 ? "近隣探索マルチキャスト" : "ブロードキャスト",
         medium: "ethernet",
         ethSrc: gwMac(s),
-        ethDst: BROADCAST,
+        ethDst: ipv6 ? solicitedNodeMac(address) : BROADCAST,
         vlan: dstVlan,
-        protocol: "ARP",
-        info: `${address} の MAC アドレスを ${dst.network!.gatewayIp} に通知してください`,
-        note: route?.kind === "static" ? "静的ルートの次ホップの MAC アドレスを ARP で調べます。" : "ルーターも、宛先ネットワーク側で宛先の MAC アドレスを ARP で調べます。",
+        protocol: discovery,
+        info: ipv6 ? `Neighbor Solicitation · ${address}` : `${address} の MAC アドレスを ${dst.network!.gatewayIp} に通知してください`,
+        note: ipv6 ? "IPv6 ルーターは NDP で宛先の MAC アドレスを調べます。" : route?.kind === "static" ? "静的ルートの次ホップの MAC アドレスを ARP で調べます。" : "ルーターも、宛先ネットワーク側で宛先の MAC アドレスを ARP で調べます。",
       });
       push({
-        kind: "arp-reply",
+        kind: replyKind,
         from: nodeName(s, `c:${dst.client.id}`),
         to: nodeName(s, gwId!),
         medium: "ethernet",
         ethSrc: dst.client.mac,
         ethDst: gwMac(s),
         vlan: dstVlan,
-        protocol: "ARP",
-        info: `${address} の MAC アドレスは ${dst.client.mac}`,
+        protocol: discovery,
+        info: ipv6 ? `Neighbor Advertisement · ${address}` : `${address} の MAC アドレスは ${dst.client.mac}`,
       });
     }
     for (const seg of secondLeg) {
@@ -191,11 +212,11 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
         from: nodeName(s, seg.from),
         to: nodeName(s, seg.to),
         medium: seg.medium,
-        wifi: seg.medium === "wifi" ? dstWifi : undefined,
+        wifi: seg.medium === "wifi" ? frameWifi(seg.edge, dstWifi) : undefined,
         ethSrc: wan ? wanMac(gwMac(s)) : gwMac(s),
         ethDst: wan ? ISP_MAC : dst!.client.mac,
         vlan: seg.vlan,
-        ipSrc: wan && (route?.kind === "wan" || route?.kind === "vpn") ? WAN_IPS[route.wan] : src.ip,
+        ipSrc: wan && !ipv6 && (route?.kind === "wan" || route?.kind === "vpn") ? WAN_IPS[route.wan] : src.ip,
         ipDst: tunnel?.endpoint ?? dstIp,
         ttl: tunnel ? 64 : 63,
         protocol: tunnel ? "UDP" : proto,
@@ -205,7 +226,7 @@ export function buildCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
         note:
           tunnel ? `カプセル化: 内側の ${src.ip} → ${dstIp} を仮想 WireGuard データとして運びます。`
           : wan
-            ? "NAT: 送信元 IP がゲートウェイの WAN アドレスに書き換えられます。"
+            ? ipv6 ? "IPv6 ルーティング: 送信元 IP を維持したまま転送します。" : "NAT: 送信元 IP がゲートウェイの WAN アドレスに書き換えられます。"
             : seg === secondLeg[0]
               ? "ルーターを通過: 送信元/宛先 MAC が書き換わり、TTL が 1 減ります。IP アドレスはそのままです。"
               : undefined,
@@ -229,7 +250,7 @@ function buildInboundCapture(s: Scenario, q: TraceQuery, r: TraceResult): Frame[
     return {
       no: i + 1, kind: "data",
       from: nodeName(s, seg.from), to: nodeName(s, seg.to), medium: seg.medium, vlan: seg.vlan,
-      wifi: !wan && target && seg.medium === "wifi" ? clientWifiMode(s, target) : undefined,
+      wifi: target && seg.medium === "wifi" ? frameWifi(seg.edge, clientWifiMode(s, target)) : undefined,
       ethSrc: wan ? ISP_MAC : gwMac(s),
       ethDst: wan ? wanMac(gwMac(s)) : target?.mac ?? "—",
       ipSrc: EXTERNAL_TEST_IP,

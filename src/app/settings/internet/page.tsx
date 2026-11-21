@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Button, FormRow, FormSection, Input, PageHeader, Select } from "@/components/ui";
+import { Button, FormRow, FormSection, Input, PageHeader, Select, Toggle } from "@/components/ui";
 import { WAN_IDS, WAN_IPS, WAN_NAMES, wanSettings } from "@/lib/net/gateway";
 import { useScenario, useStore } from "@/lib/store";
 import type { WanSettings } from "@/lib/model";
@@ -12,6 +12,7 @@ export default function InternetPage() {
   const s = useScenario();
   const mutate = useStore((x) => x.mutate);
   const [pending, setPending] = useState<WanSettings | null>(null);
+  const [pendingIpv6, setPendingIpv6] = useState<boolean | null>(null);
   const draft = pending ?? wanSettings(s);
   const update = (fn: (wan: WanSettings) => void) => {
     const next = structuredClone(draft);
@@ -26,11 +27,20 @@ export default function InternetPage() {
   return (
     <div className="max-w-3xl">
       <PageHeader title="インターネット">
-        <Button variant="primary" disabled={!pending || invalid} onClick={() => {
-          mutate((sc) => (sc.wan = draft));
+        <Button variant="primary" disabled={(!pending && pendingIpv6 === null) || invalid} onClick={() => {
+          mutate((sc) => {
+            if (pending) sc.wan = draft;
+            if (pendingIpv6 !== null) sc.ipv6Wan = pendingIpv6;
+          });
           setPending(null);
+          setPendingIpv6(null);
         }}>変更を適用</Button>
       </PageHeader>
+      <FormSection title="IPv6">
+        <FormRow label="IPv6 インターネット" hint="グローバル IPv6 を持つ VLAN から、接続中の仮想 WAN を通って通信します。">
+          <Toggle label="IPv6 インターネット" checked={pendingIpv6 ?? s.ipv6Wan ?? false} onChange={setPendingIpv6} />
+        </FormRow>
+      </FormSection>
       <FormSection title="マルチ WAN">
         <FormRow label="回線の選択方式" hint={draft.mode === "failover"
           ? "WAN1 が停止したとき、新しい通信は WAN2 に切り替わります。"

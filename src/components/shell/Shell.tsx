@@ -45,6 +45,7 @@ const SETTING_PAGES = [
   { href: "/settings/networks", label: "ネットワーク設定", words: ["network", "ネットワーク", "vlan", "dhcp", "サブネット", "mdns"] },
   { href: "/settings/zones", label: "ゾーン", words: ["zone", "ゾーン", "ファイアウォール", "firewall"] },
   { href: "/settings/policies", label: "ポリシー一覧", words: ["policy", "ポリシー", "ファイアウォール", "firewall", "ルール"] },
+  { href: "/settings/security", label: "セキュリティとコンテンツ", words: ["ids", "ips", "dns フィルター", "セキュリティ", "ブロック"] },
   { href: "/ports", label: "ポートマネージャー", words: ["port", "ポート", "trunk", "トランク", "ケーブル", "配線"] },
   { href: "/floorplan", label: "フロアプラン", words: ["floor", "フロア", "間取り", "電波", "ヒートマップ", "部屋"] },
 ];

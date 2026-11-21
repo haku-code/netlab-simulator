@@ -2,7 +2,8 @@ import type { Scenario } from "./model";
 import { ephemeralPort } from "./capture";
 import { dnsServerOf, parseUrl, probe, type ProbeResult } from "./emu";
 import { parseIp } from "./net/ip";
-import { resolveClient } from "./net/simulate";
+import { ipv6Gateway, parseIpv6, type IpFamily } from "./net/ipv6";
+import { ipv6ClientState, resolveClient } from "./net/simulate";
 import { virtualWebCapture, webError, type WebEvent } from "./web";
 import { clientWifiMode } from "./wifi-security";
 
@@ -34,15 +35,17 @@ export function wifiPacketContext(s: Scenario, id: string) {
   const ssid = s.ssids.find((w) => w.id === ssidId);
   const mode = clientWifiMode(s, client);
   if (!ssid || !mode) return null;
-  const { ip, attachDeviceId } = resolveClient(s, id);
+  const state = resolveClient(s, id);
+  const { ip, attachDeviceId } = state;
   const ap = s.devices.find((d) => d.id === attachDeviceId);
-  return ap && ip ? { ssid, mode, station: client, ap, ip } : null;
+  const ipv6 = ipv6ClientState(state).ip;
+  return ap && (ip || ipv6) ? { ssid, mode, station: client, ap, ip, ipv6 } : null;
 }
 
 export function observeWifiPackets(packets: PcPacket[], context: NonNullable<ReturnType<typeof wifiPacketContext>>): PcPacket[] {
-  const { ssid, mode, station, ap, ip } = context;
+  const { ssid, mode, station, ap, ip, ipv6 } = context;
   return packets.map((packet) => {
-    const outgoing = packet.source === ip;
+    const outgoing = packet.source === ip || packet.source === ipv6;
     const transmitter = outgoing ? station.mac : ap.mac;
     const receiver = outgoing ? ap.mac : station.mac;
     const radio = { ssid: ssid.name, station: station.name, security: mode.label, visibility: mode.radio, transmitter, receiver };
@@ -59,24 +62,29 @@ function targetIp(result: ProbeResult) {
 }
 
 function dnsPackets(s: Scenario, clientId: string, source: string, host: string, result: ProbeResult): PcPacket[] {
-  if (parseIp(host) !== null || result.status === "noip") return [];
-  const dns = dnsServerOf(s, clientId);
-  if (!dns || parseIp(dns) === null) return [];
+  if (parseIp(host) !== null || host.includes(":") || result.status === "noip") return [];
+  const ipv6 = parseIpv6(source) !== null;
+  const network = ipv6 ? resolveClient(s, clientId).network : undefined;
+  const dns = ipv6 ? network && ipv6Gateway(network) : dnsServerOf(s, clientId);
+  if (!dns || (!ipv6 && parseIp(dns) === null)) return [];
+  const record = ipv6 ? "AAAA" : "A";
   const clientPort = ephemeralPort(clientId + host + "dns");
-  const query: PcPacket = { protocol: "DNS", source, destination: dns, sourcePort: clientPort, destinationPort: 53, summary: `A 問い合わせ · ${host}` };
+  const query: PcPacket = { protocol: "DNS", source, destination: dns, sourcePort: clientPort, destinationPort: 53, summary: `${record} 問い合わせ · ${host}` };
+  if (result.security?.some((decision) => decision.layer === "DNS"))
+    return [query, { protocol: "DNS", source: dns, destination: source, sourcePort: 53, destinationPort: clientPort, summary: `REFUSED · ${host}` }];
   const ip = targetIp(result);
   if (result.status === "dns" || !ip || ("target" in result && result.target.kind === "unknown")) return [query];
-  return [query, { protocol: "DNS", source: dns, destination: source, sourcePort: 53, destinationPort: clientPort, summary: `A 応答 · ${host} → ${ip}` }];
+  return [query, { protocol: "DNS", source: dns, destination: source, sourcePort: 53, destinationPort: clientPort, summary: `${record} 応答 · ${host} → ${ip}` }];
 }
 
-export function browserPackets(s: Scenario, clientId: string, address: string, event: WebEvent, newConnection = true): PcPacket[] {
+export function browserPackets(s: Scenario, clientId: string, address: string, event: WebEvent, newConnection = true, family?: IpFamily): PcPacket[] {
   const parsed = parseUrl(address);
   if (!parsed) return [];
   const { host, scheme, port } = parsed;
-  const result = probe(s, clientId, host, "tcp", port);
+  const result = probe(s, clientId, host, "tcp", port, family);
   const service = result.status === "ok" && result.target.kind === "client" && result.target.client.kind === "server" ? result.target.client.webService : undefined;
   const problem = service ? webError(service, host, scheme, port) : null;
-  const capture = virtualWebCapture(s, clientId, scheme, port, result, problem, event);
+  const capture = virtualWebCapture(s, clientId, scheme, port, result, problem, event, family);
   if (!capture.ip || result.status === "noip") return [];
 
   const packets = newConnection ? dnsPackets(s, clientId, capture.ip, host, result) : [];
@@ -114,16 +122,19 @@ export function browserPackets(s: Scenario, clientId: string, address: string, e
   return packets;
 }
 
-export function pingPackets(s: Scenario, clientId: string, host: string): PcPacket[] {
-  const source = resolveClient(s, clientId).ip;
+export function pingPackets(s: Scenario, clientId: string, host: string, family?: IpFamily): PcPacket[] {
+  const state = resolveClient(s, clientId);
+  const ipv6 = family === "ipv6" || parseIpv6(host) !== null;
+  const source = ipv6 ? ipv6ClientState(state).ip : state.ip;
   if (!source) return [];
-  const result = probe(s, clientId, host, "icmp", null);
+  const result = probe(s, clientId, host, "icmp", null, family);
   const packets = dnsPackets(s, clientId, source, host, result);
   const ip = targetIp(result);
   if (!ip || ("target" in result && result.target.kind === "unknown")) return packets;
   for (let seq = 0; seq < 4; seq++) {
-    packets.push({ protocol: "ICMP", source, destination: ip, summary: `Echo Request · seq=${seq}` });
-    if (result.status === "ok") packets.push({ protocol: "ICMP", source: ip, destination: source, summary: `Echo Reply · seq=${seq}` });
+    const label = ipv6 ? "ICMPv6 " : "";
+    packets.push({ protocol: "ICMP", source, destination: ip, summary: `${label}Echo Request · seq=${seq}` });
+    if (result.status === "ok") packets.push({ protocol: "ICMP", source: ip, destination: source, summary: `${label}Echo Reply · seq=${seq}` });
   }
   return packets;
 }
