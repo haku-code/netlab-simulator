@@ -19,6 +19,7 @@ import { formatIpv6, inIpv6Subnet, INTERNET_IP6, ipv6Gateway, isGlobalIpv6, lanI
 import { inspectTraffic, type SecurityDecision } from "./security";
 import { EXTERNAL_TEST_IP, INTERNET_IP, WAN_IPS, WAN_NAMES, chooseWan, gatewayRoute, isPrivateIp, QOS_LABELS, wanBandwidth, wanSettings } from "./gateway";
 import { listensOn } from "./services";
+import { clientPoweredOffReason, linkForwards, poweredOffReason, stormReason, switchingState, syncPortSettings } from "./switching";
 
 // ---------------------------------------------------------------------------
 // 基本ヘルパー
@@ -97,6 +98,8 @@ function bfs(s: Scenario, from: string, to: string, netId: string | null) {
     const cur = q.shift()!;
     if (cur === to) break;
     for (const l of s.links) {
+      // STP でブロックされたリンク・電源の入っていない機器は通れない
+      if (!linkForwards(s, l)) continue;
       const other =
         l.a.deviceId === cur ? l.b.deviceId : l.b.deviceId === cur ? l.a.deviceId : null;
       if (!other || prev.has(other)) continue;
@@ -156,6 +159,10 @@ export function uplinkOf(s: Scenario, deviceId: string) {
 
 /** 機器 from から to まで、ネットワーク netId のフレームが届くか */
 export function l2Path(s: Scenario, netId: string, from: string, to: string): L2Result {
+  const off = poweredOffReason(s, from) ?? poweredOffReason(s, to);
+  if (off) return { ok: false, reason: off, failLinkIds: [], deviceIds: [from], linkIds: [] };
+  const storm = stormReason(s, [from, to]);
+  if (storm) return { ok: false, reason: storm, failLinkIds: [...switchingState(s).stormLinks], deviceIds: [from], linkIds: [] };
   const ok = bfs(s, from, to, netId);
   if (ok) return { ok: true, ...ok };
   const phys = bfs(s, from, to, null);
@@ -233,8 +240,12 @@ export function radioLink(s: Scenario, c: Client, ssid: WifiSsid, apId: string) 
 
 /** その SSID を配信している AP のうち、電波が最も強いものを選ぶ */
 export function associate(s: Scenario, c: Client, ssid: WifiSsid): { ok: true; ap: Device; rssi: number } | { ok: false; reason: string; best?: { ap: Device; rssi: number } } {
-  const aps = s.devices.filter((d) => d.type === "ap" && broadcasts(ssid, d.id));
-  if (!aps.length) return { ok: false, reason: `SSID「${ssid.name}」はどの AP からも配信されていません（配信 AP の設定）。` };
+  const aps = s.devices.filter((d) => d.type === "ap" && broadcasts(ssid, d.id) && !switchingState(s).unpowered.has(d.id));
+  if (!aps.length) {
+    const off = s.devices.find((d) => d.type === "ap" && broadcasts(ssid, d.id));
+    if (off) return { ok: false, reason: poweredOffReason(s, off.id) ?? `${off.name} が停止しています。` };
+    return { ok: false, reason: `SSID「${ssid.name}」はどの AP からも配信されていません（配信 AP の設定）。` };
+  }
   const cands = aps.flatMap((ap) => {
     const l = clientSignal(s, c, ssid, ap);
     if (ap.meshParentId && !uplinkOf(s, ap.id).online) return [];
@@ -316,6 +327,8 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
       return { ...st, error: `${dev.name} / ${port.name} が無効化されています。`, errorStage: "attach" };
     }
     st.attachDeviceId = dev.id;
+    const off = clientPoweredOffReason(s, client.id);
+    if (off) return { ...st, error: off, errorStage: "attach" };
     const net = findNetwork(s, port.nativeNetworkId);
     if (!net) {
       return {
@@ -344,6 +357,8 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
         return { ...st, error: `${ap.name} は SSID「${ssid.name}」を配信していません（配信 AP の設定）。`, errorStage: "attach" };
       }
     }
+    const apOff = poweredOffReason(s, ap.id);
+    if (apOff) return { ...st, error: apOff, errorStage: "attach" };
     if (!wifiLink(client, ssid, ap.id)) {
       return {
         ...st,
@@ -471,6 +486,8 @@ export function resolveClient(s: Scenario, clientId: string): ClientState {
  * 実機の DHCP クライアントが定期的に再要求するのと同じ振る舞い。
  */
 export function assignLeases(s: Scenario): Scenario {
+  // ポートプロファイル・LAG の設定をポートへ反映し、STP / PoE を計算し直す
+  syncPortSettings(s);
   for (const c of s.clients) {
     if (c.ipMode !== "dhcp") {
       c.lease = null;

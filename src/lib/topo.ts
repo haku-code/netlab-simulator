@@ -27,7 +27,7 @@ export function clientsOf(s: Scenario, deviceId: string) {
   return s.clients.filter((c) => attachedTo(c) === deviceId);
 }
 
-export function taggedLabel(s: Scenario, p: Port) {
+export function taggedLabel(s: Scenario, p: Pick<Port, "tagged" | "taggedNetworkIds">) {
   if (p.tagged === "all") return "すべて許可";
   if (p.tagged === "none") return "すべて拒否";
   const names = p.taggedNetworkIds.map((id) => s.networks.find((n) => n.id === id)?.vlanId).filter((x) => x !== undefined);

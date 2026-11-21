@@ -4,6 +4,7 @@ import { access, link, makeDevice, network, policy, setPort, ssid, trunk, wifi, 
 import { discover } from "../mdns";
 import { EXTRA } from "./extra";
 import { PHASE_ONE } from "./phase-one";
+import { PHASE_THREE } from "./phase-three";
 import { baseTopology, q } from "./helpers";
 
 /** 到達性チェック（trace）か、mDNS で見つかるかのチェック */
@@ -281,7 +282,7 @@ const CORE: Lesson[] = [
   },
 ];
 
-const byId = new Map([...CORE, ...EXTRA, ...PHASE_ONE].map((l) => [l.id, l]));
+const byId = new Map([...CORE, ...EXTRA, ...PHASE_ONE, ...PHASE_THREE].map((l) => [l.id, l]));
 
 /** 難易度順の課題一覧 */
 export const LESSONS: Lesson[] = [
@@ -301,6 +302,8 @@ export const LESSONS: Lesson[] = [
   "ha-only",
   "iot-return",
   "kids-night",
+  "switch-loop",
+  "poe-budget",
   "rule-order",
   "final",
 ].map((id) => byId.get(id)!);

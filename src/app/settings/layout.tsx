@@ -10,6 +10,7 @@ const GROUPS = [
     items: [
       { href: "/settings/wifi", label: "Wi-Fi", area: "wifi" },
       { href: "/settings/networks", label: "ネットワーク", area: "networks" },
+      { href: "/settings/profiles", label: "ポートプロファイル" },
       { href: "/settings/internet", label: "インターネット" },
       { href: "/settings/routing", label: "ルーティング・VPN" },
       { href: "/settings/qos", label: "QoS" },
@@ -23,6 +24,14 @@ const GROUPS = [
       { href: "/settings/objects", label: "オブジェクト" },
       { href: "/settings/forwarding", label: "ポートフォワード" },
       { href: "/settings/security", label: "セキュリティとコンテンツ" },
+    ],
+  },
+  {
+    title: "システム",
+    items: [
+      { href: "/settings/sites", label: "サイト" },
+      { href: "/settings/admins", label: "管理者とロール" },
+      { href: "/settings/backup", label: "バックアップ" },
     ],
   },
 ];

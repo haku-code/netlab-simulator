@@ -6,6 +6,7 @@ import { access, link, makeDevice, network, policy, setPort, ssid, trunk, wifi, 
 export function defaultScenario(): Scenario {
   const gw = setPort(makeDevice("gateway", "gw", "Gateway"), 1, trunk("lan", "all"));
   const sw = makeDevice("switch", "sw1", "Core Switch");
+  sw.poeBudgetW = 60;
   setPort(sw, 1, trunk("lan", "all"));
   setPort(sw, 2, access("lan"));
   setPort(sw, 3, access("lan"));

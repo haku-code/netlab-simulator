@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { ClientIcon, DeviceGlyph } from "@/components/icons";
 import { DND_CLIENT, PortFaceplate } from "@/components/PortFaceplate";
 import { PortPanel } from "@/components/panels/PortPanel";
+import { LagBadge, PoeBudgetBar, portPoeLabel, portStpState } from "@/components/switching";
 import { Notice, PageHeader, table as t, vlanColor } from "@/components/ui";
 import { useIssues } from "@/lib/hooks";
 import { findNetwork, resolveClient } from "@/lib/net/simulate";
@@ -98,6 +99,7 @@ export default function PortsPage() {
             <div className="rounded-lg border border-line bg-surface p-4">
               <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">
                 <span className="font-medium text-fg">{device.name}</span>
+                <span className="ml-auto order-last w-full sm:order-none sm:w-auto"><PoeBudgetBar s={s} device={device} /></span>
                 {s.networks.map((n, i) => (
                   <span key={n.id} className="inline-flex items-center gap-1.5">
                     <span className="h-[3px] w-3 rounded-full" style={{ background: vlanColor(i) }} />
@@ -177,6 +179,8 @@ export default function PortsPage() {
                   <th className={t.th}>ポート</th>
                   <th className={t.th}>名前</th>
                   <th className={t.th}>状態</th>
+                  <th className={t.th}>STP</th>
+                  <th className={t.th}>PoE</th>
                   <th className={t.th}>ネイティブ VLAN</th>
                   <th className={t.th}>タグ付き VLAN の管理</th>
                   <th className={t.th}>接続先</th>
@@ -186,10 +190,19 @@ export default function PortsPage() {
                 {device.ports.map((p) => {
                   const peer = portPeer(s, device.id, p.id);
                   const ni = s.networks.findIndex((n) => n.id === p.nativeNetworkId);
+                  const stp = portStpState(s, device.id, p);
+                  const poe = portPoeLabel(s, device.id, p.id);
+                  const profile = s.portProfiles?.find((x) => x.id === p.profileId);
                   return (
                     <tr key={p.id} className={clsx(t.tr, portId === p.id && t.sel)} onClick={() => setPortId(p.id)}>
                       <td className={clsx(t.td, "tnum")}>{p.idx}</td>
-                      <td className={t.td}>{p.name}</td>
+                      <td className={t.td}>
+                        <span className="inline-flex items-center gap-1.5">
+                          {p.name}
+                          <LagBadge port={p} />
+                          {profile && <span className="text-[11.5px] text-muted">{profile.name}</span>}
+                        </span>
+                      </td>
                       <td className={t.td}>
                         {!p.enabled ? (
                           <span className="text-muted">無効</span>
@@ -204,6 +217,10 @@ export default function PortsPage() {
                             リンクなし
                           </span>
                         )}
+                      </td>
+                      <td className={clsx(t.td, stp?.tone === "err" ? "text-err" : stp?.tone === "warn" ? "text-warn" : "text-fg-2")}>{stp?.label ?? "—"}</td>
+                      <td className={clsx(t.td, "tnum", !poe ? "text-muted" : poe.tone === "ok" ? "text-fg-2" : poe.tone === "err" ? "text-err" : "text-warn")} title={poe?.detail}>
+                        {poe?.label ?? "—"}
                       </td>
                       <td className={t.td}>
                         {ni >= 0 ? (
