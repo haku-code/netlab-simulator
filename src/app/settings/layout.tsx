@@ -10,6 +10,7 @@ const GROUPS = [
     items: [
       { href: "/settings/wifi", label: "Wi-Fi", area: "wifi" },
       { href: "/settings/networks", label: "ネットワーク", area: "networks" },
+      { href: "/settings/profiles", label: "ポートプロファイル" },
       { href: "/settings/internet", label: "インターネット" },
       { href: "/settings/routing", label: "ルーティング・VPN" },
       { href: "/settings/qos", label: "QoS" },

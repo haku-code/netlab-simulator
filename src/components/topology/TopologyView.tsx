@@ -1,6 +1,7 @@
 "use client";
 
 import "@xyflow/react/dist/style.css";
+import { switchingState } from "@/lib/net/switching";
 import { BaseEdge, Controls, EdgeLabelRenderer, Handle, Position, ReactFlow, getSmoothStepPath, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import clsx from "clsx";
 import { Cable, Globe, Wifi } from "lucide-react";
@@ -317,7 +318,7 @@ export function TopologyView({
         type: "device",
         position: pos.get(d.id) ?? { x: 0, y: 0 },
         data: {
-          name: d.name, sub: d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id,
+          name: d.name, sub: switchingState(s).unpowered.has(d.id) ? "給電なし" : d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id,
           acceptsCable: !!onEditConnection && d.type !== "ap" && d.ports.length > 0,
           dragOver: dragTarget === d.id,
         } satisfies DeviceData,
@@ -349,11 +350,19 @@ export function TopologyView({
       edges.push({ id: "wan", source: "internet", target: gw.id, type: "smoothstep", selectable: false, focusable: false, style: stroke(on) });
     }
     const y = (id: string) => pos.get(id)?.y ?? 0;
+    const sw = switchingState(s);
     for (const l of s.links) {
       const [up, down] = y(l.a.deviceId) <= y(l.b.deviceId) ? [l.a, l.b] : [l.b, l.a];
       const on = highlight?.linkIds.includes(l.id);
       const fail = highlight?.failLinkIds.includes(l.id);
-      edges.push({ id: l.id, source: up.deviceId, target: down.deviceId, type: "smoothstep", animated: !!on, style: stroke(on, fail) });
+      // STP でブロック中は破線、ループ (ストーム) は赤
+      const blocked = sw.blocked.has(l.id);
+      const storm = sw.stormLinks.has(l.id);
+      const base = stroke(on, fail || storm);
+      edges.push({
+        id: l.id, source: up.deviceId, target: down.deviceId, type: "smoothstep", animated: !!on || storm,
+        style: blocked && !on ? { ...base, stroke: "var(--warn)", strokeDasharray: "6 4" } : base,
+      });
     }
     for (const c of s.clients) {
       const at = parents.get(c.id);

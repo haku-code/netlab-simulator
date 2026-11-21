@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { attachedTo } from "@/lib/model";
 import { useStore } from "@/lib/store";
+import { poeBudget, stpOf, switchingState } from "@/lib/net/switching";
+import { SwitchSettings } from "../switching";
 import { uplinkOf } from "@/lib/net/simulate";
 import { clientsOf, portPeer } from "@/lib/topo";
 import Link from "next/link";
@@ -69,6 +71,11 @@ export function DevicePanel({ deviceId, onClose }: { deviceId: string | null; on
             ["MAC アドレス", <span key="mac" className="tnum">{device.mac}</span>],
             ["上流接続", device.type === "gateway" ? "WAN · インターネット" : up.online && "parentName" in up ? `${up.parentName} · ${up.parentPort}` : "—"],
             ...(device.type !== "ap" ? ([["ポート", `${usedPorts} / ${device.ports.length} 使用中`]] as [string, string][]) : []),
+            ...(device.type === "switch"
+              ? ([["STP", !stpOf(device).enabled ? "無効" : switchingState(s).rootId === device.id ? "ルートブリッジ" : `有効 · 優先度 ${stpOf(device).priority}`]] as [string, string][])
+              : []),
+            ...(poeBudget(device) > 0 ? ([["PoE", `${switchingState(s).poe.get(device.id)?.used ?? 0} / ${poeBudget(device)} W`]] as [string, string][]) : []),
+            ...(device.type === "ap" ? ([["電源", switchingState(s).unpowered.has(device.id) ? "給電なし（停止中）" : "PoE / アダプター"]] as [string, string][]) : []),
             ...(device.type === "ap" ? ([["Wi-Fi", ssids || "—"]] as [string, string][]) : []),
             ["クライアント", String(clients.length)],
           ]}
@@ -78,6 +85,11 @@ export function DevicePanel({ deviceId, onClose }: { deviceId: string | null; on
         <>
           <PortFaceplate s={s} device={device} compact onSelect={(pid) => router.push(`/ports?device=${device.id}&port=${encodeURIComponent(pid)}`)} />
           <p className="text-[12px] text-muted">ポートをクリックするとポートマネージャーで設定を開きます。</p>
+          {device.type === "switch" && (
+            <div className="border-t border-line pt-4">
+              <SwitchSettings deviceId={device.id} />
+            </div>
+          )}
         </>
       )}
       {tab === "wifi" && <ApWifi apId={device.id} />}

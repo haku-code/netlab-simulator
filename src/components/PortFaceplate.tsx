@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import { useState } from "react";
 import type { Device, Scenario } from "@/lib/model";
+import { portRole, switchingState } from "@/lib/net/switching";
 import { portPeer } from "@/lib/topo";
 import { vlanColor } from "./ui";
 
@@ -29,12 +30,19 @@ export function PortFaceplate({
 }) {
   const [over, setOver] = useState<string | null>(null);
   const netIndex = (id: string | null) => s.networks.findIndex((n) => n.id === id);
+  const sw = switchingState(s);
+  const stormPorts = new Set(
+    s.links.filter((l) => sw.stormLinks.has(l.id)).flatMap((l) => [l.a, l.b]).filter((e) => e.deviceId === device.id).map((e) => e.portId),
+  );
   return (
     <div className={clsx("inline-flex flex-wrap gap-1.5 rounded-md border border-line bg-surface-2", compact ? "p-2" : "p-3")}>
       {device.ports.map((p) => {
         const peer = portPeer(s, device.id, p.id);
         const up = !!peer && p.enabled;
         const blinking = negotiating === p.id;
+        const stpBlocked = portRole(s, device.id, p.id) === "blocked";
+        const storm = stormPorts.has(p.id);
+        const poe = sw.poe.get(device.id)?.ports.get(p.id);
         const ni = netIndex(p.nativeNetworkId);
         const draggable = !!onDropClient && peer?.kind === "client";
         return (
@@ -59,7 +67,7 @@ export function PortFaceplate({
               const id = e.dataTransfer.getData(DND_CLIENT);
               if (id && onDropClient) onDropClient(p.id, id);
             }}
-            title={`${p.name}${peer ? ` → ${peer.kind === "device" ? `${peer.device.name} ${peer.port.name}` : peer.client.name}` : ""}`}
+            title={`${p.name}${peer ? ` → ${peer.kind === "device" ? `${peer.device.name} ${peer.port.name}` : peer.client.name}` : ""}${p.lag !== undefined ? ` · LAG ${p.lag}` : ""}${stpBlocked ? " · STP ブロック" : ""}${storm ? " · ループ" : ""}${poe ? ` · PoE ${poe.powered ? `${poe.watts} W` : "給電なし"}` : ""}`}
             className={clsx(
               "group flex flex-col items-center rounded px-1 pt-1 pb-1.5 transition-colors",
               selected === p.id ? "bg-accent-soft ring-1 ring-accent" : "hover:bg-hover",
@@ -68,7 +76,7 @@ export function PortFaceplate({
               !onSelect && !onDropClient && "cursor-default",
             )}
           >
-            <span className="tnum mb-1 text-[10.5px] text-muted">{device.type === "ap" ? "↑" : p.idx}</span>
+            <span className={clsx("tnum mb-1 text-[10.5px]", p.lag !== undefined ? "font-semibold text-accent" : "text-muted")}>{device.type === "ap" ? "↑" : p.idx}</span>
             <span
               className={clsx(
                 "relative flex items-end justify-center rounded-[3px] border",
@@ -78,8 +86,15 @@ export function PortFaceplate({
             >
               {/* リンク / アクティビティ LED */}
               {p.enabled && peer && (
-                <span className={clsx("absolute top-[3px] left-[3px] size-[5px] rounded-full", blinking ? "animate-pulse bg-warn" : "bg-ok")} />
+                <span
+                  className={clsx(
+                    "absolute top-[3px] left-[3px] size-[5px] rounded-full",
+                    storm ? "animate-pulse bg-err" : blinking ? "animate-pulse bg-warn" : stpBlocked ? "bg-warn" : "bg-ok",
+                  )}
+                />
               )}
+              {/* PoE 給電 LED */}
+              {p.enabled && poe && <span className={clsx("absolute top-[3px] right-[3px] size-[5px] rounded-full", poe.powered ? "bg-warn" : "bg-faint")} />}
               {/* RJ45 の切り欠き */}
               <span className={clsx("mb-[3px] h-[5px] w-[45%] rounded-[1px]", !p.enabled ? "bg-line" : up ? "bg-ok/70" : "bg-faint/50")} />
               {!p.enabled && <span className="absolute inset-0 m-auto h-px w-[70%] rotate-[-30deg] bg-faint" />}

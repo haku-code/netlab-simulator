@@ -26,6 +26,12 @@ export interface Port {
   taggedNetworkIds: string[];
   enabled: boolean;
   speed: string;
+  /** リンクアグリゲーション (LAG) のグループ番号。同じ番号のポートを 1 本の論理リンクに束ねる */
+  lag?: number;
+  /** 適用中のポートプロファイル。設定はプロファイルから同期される */
+  profileId?: string;
+  /** PoE 給電。未指定は auto（給電可能な機器なら給電する） */
+  poe?: "auto" | "off";
 }
 
 export interface Device {
@@ -36,6 +42,12 @@ export interface Device {
   mac: string;
   ip: string;
   ports: Port[];
+  /** スパニングツリー (RSTP)。未指定は有効・優先度 32768（スイッチのみ参加） */
+  stp?: { enabled: boolean; priority: number };
+  /** PoE の電力予算 (W)。未指定・0 なら PoE 非対応（接続機器は AC アダプターで動く想定） */
+  poeBudgetW?: number;
+  /** PoE で受電する機器の消費電力 (W)。AP の未指定は 13 W */
+  poeDrawW?: number;
   /** フロアプラン上の位置 (m) */
   pos?: XY;
   /** AP の送信出力 */
@@ -52,6 +64,16 @@ export interface Link {
   id: string;
   a: PortRef;
   b: PortRef;
+}
+
+/** ポートプロファイル: 複数ポートに使い回す VLAN・PoE 設定 */
+export interface PortProfile {
+  id: string;
+  name: string;
+  nativeNetworkId: string | null;
+  tagged: TaggedMode;
+  taggedNetworkIds: string[];
+  poe: "auto" | "off";
 }
 
 export const DEFAULT_DHCP_LEASE_TIME = 86400;
@@ -183,6 +205,8 @@ export interface Client {
   reservedIp?: string;
   /** フロアプラン上の位置 (m) */
   pos?: XY;
+  /** PoE で受電する端末（カメラ・IP 電話など）の消費電力 (W) */
+  poeW?: number;
 }
 
 export function isIPhone(client: Pick<Client, "id" | "name">) {
@@ -262,6 +286,7 @@ export interface Scenario {
   vpnTunnels?: VpnTunnel[];
   staticRoutes?: StaticRoute[];
   qos?: QosRule[];
+  portProfiles?: PortProfile[];
 }
 
 export const BUILTIN_ZONES: Zone[] = [

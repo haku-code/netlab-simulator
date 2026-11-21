@@ -1,6 +1,7 @@
 import type { FirewallPolicy, Scenario } from "../model";
 import { wifiMode } from "../wifi-security";
 import { inSubnet, isHostAddr, overlaps, parseCidr, parseIp } from "./ip";
+import { switchingIssues } from "./switching";
 import { CLIENT_REF, clientNetworkId, findNetwork, findObject, isClientRef, isGroupRef, zoneName, zoneOfNetwork } from "./simulate";
 
 export interface Issue {
@@ -177,5 +178,7 @@ export function validate(s: Scenario): Issue[] {
     }
   });
 
+  // --- スイッチング（ループ・PoE・LAG） ---
+  out.push(...switchingIssues(s));
   return out;
 }

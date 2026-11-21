@@ -6,6 +6,8 @@ import { uid, type Port, type TaggedMode } from "@/lib/model";
 import { findNetwork } from "@/lib/net/simulate";
 import { useStore } from "@/lib/store";
 import { portBusy, portPeer, taggedLabel } from "@/lib/topo";
+import { lagPorts, poeBudget } from "@/lib/net/switching";
+import { portPoeLabel, portStpState } from "../switching";
 import { Button, Checkbox, Field, Input, KV, Segmented, Select, SidePanel, Toggle, useDraft } from "../ui";
 
 export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; portId: string | null; onClose: () => void }) {
@@ -41,6 +43,18 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
       const dev = sc.devices.find((x) => x.id === deviceId)!;
       const i = dev.ports.findIndex((p) => p.id === port.id);
       dev.ports[i] = draft.port;
+      // LAG のメンバーは 1 本のリンクとして同じ設定にそろえる
+      if (draft.port.lag !== undefined)
+        for (const m of dev.ports)
+          if (m.id !== port.id && m.lag === draft.port.lag)
+            Object.assign(m, {
+              nativeNetworkId: d.nativeNetworkId,
+              tagged: d.tagged,
+              taggedNetworkIds: [...d.taggedNetworkIds],
+              enabled: d.enabled,
+              profileId: d.profileId,
+            });
+      if (!draft.port.profileId) delete draft.port.profileId;
       if (peer?.kind !== "client") {
         sc.links = sc.links.filter((l) => !(peer?.kind === "device" && l.id === peer.linkId));
         if (draft.cable) {
@@ -51,6 +65,23 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
     });
 
   const peerPort = peer?.kind === "device" ? peer.port : null;
+  const stpState = portStpState(s, deviceId, port);
+  const poe = portPoeLabel(s, deviceId, port.id);
+  const profile = s.portProfiles?.find((x) => x.id === d.profileId);
+  const members = lagPorts(device, port);
+  const applyProfile = (id: string) =>
+    set((p) => {
+      const prof = s.portProfiles?.find((x) => x.id === id);
+      if (!prof) {
+        delete p.profileId;
+        return;
+      }
+      p.profileId = prof.id;
+      p.nativeNetworkId = prof.nativeNetworkId;
+      p.tagged = prof.tagged;
+      p.taggedNetworkIds = [...prof.taggedNetworkIds];
+      p.poe = prof.poe;
+    });
 
   return (
     <SidePanel
@@ -74,6 +105,9 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
           ["接続先", peer ? (peer.kind === "device" ? `${peer.device.name} · ${peer.port.name}` : peer.client.name) : "—"],
           ["ネイティブ VLAN", findNetwork(s, port.nativeNetworkId)?.name ?? "なし"],
           ["タグ付き VLAN", taggedLabel(s, port)],
+          ...(stpState ? ([["STP", <span key="stp" className={stpState.tone === "err" ? "text-err" : stpState.tone === "warn" ? "text-warn" : undefined}>{stpState.label}</span>]] as [string, React.ReactNode][]) : []),
+          ...(port.lag !== undefined ? ([["LAG", `LAG ${port.lag} · ${members.map((m) => m.idx).join(", ")} 番`]] as [string, string][]) : []),
+          ...(poe ? ([["PoE", <span key="poe" title={poe.detail} className={poe.tone === "ok" ? undefined : poe.tone === "err" ? "text-err" : "text-warn"}>{poe.label}</span>]] as [string, React.ReactNode][]) : []),
         ]}
       />
       <div className="h-px bg-line" />
@@ -84,6 +118,20 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
         <span>ポートを有効にする</span>
         <Toggle checked={d.enabled} onChange={(v) => set((p) => (p.enabled = v))} />
       </div>
+      <Field label="ポートプロファイル" term="port-profile" hint={profile ? "VLAN と PoE はプロファイルの設定に従います。個別に変えるには「なし」に戻します。" : undefined}>
+        <Select
+          aria-label="ポートプロファイル"
+          value={d.profileId ?? ""}
+          onChange={applyProfile}
+          options={[{ value: "", label: "なし（ポートごとに設定）" }, ...(s.portProfiles ?? []).map((x) => ({ value: x.id, label: x.name }))]}
+        />
+      </Field>
+      {profile ? (
+        <div className="rounded border border-line bg-surface-2 px-3 py-2 text-[12px] text-fg-2">
+          ネイティブ VLAN: {findNetwork(s, d.nativeNetworkId)?.name ?? "なし"} · タグ付き: {taggedLabel(s, d)} · PoE: {d.poe === "off" ? "オフ" : "自動"}
+        </div>
+      ) : (
+        <>
       <Field label="ネイティブ VLAN / ネットワーク" term="native">
         <Select value={d.nativeNetworkId ?? ""} onChange={(v) => set((p) => (p.nativeNetworkId = v || null))} options={networkOptions(s, { none: "なし" })} />
       </Field>
@@ -116,6 +164,30 @@ export function PortPanel({ deviceId, portId, onClose }: { deviceId: string; por
           </div>
         )}
       </Field>
+      {poeBudget(device) > 0 && (
+        <Field label="PoE" term="poe" hint={poe?.detail}>
+          <Segmented<"auto" | "off">
+            value={d.poe ?? "auto"}
+            onChange={(v) => set((p) => (p.poe = v))}
+            options={[
+              { value: "auto", label: "PoE+（自動）" },
+              { value: "off", label: "オフ" },
+            ]}
+          />
+        </Field>
+      )}
+        </>
+      )}
+      {device.type === "switch" && (
+        <Field label="リンクアグリゲーション (LAG)" term="lag" hint="同じ番号のポートを 1 本の論理リンクに束ねます。対向スイッチでも同じポートを束ねてください。メンバーは番号が最小のポートの設定に揃います。">
+          <Select
+            aria-label="リンクアグリゲーション"
+            value={d.lag === undefined ? "" : String(d.lag)}
+            onChange={(v) => set((p) => (v ? (p.lag = Number(v)) : delete p.lag))}
+            options={[{ value: "", label: "なし" }, ...[1, 2, 3, 4].map((n) => ({ value: String(n), label: `LAG ${n}` }))]}
+          />
+        </Field>
+      )}
       {peer?.kind === "client" ? (
         <Field label="接続中のクライアント">
           <div className="text-fg-2">{peer.client.name}</div>

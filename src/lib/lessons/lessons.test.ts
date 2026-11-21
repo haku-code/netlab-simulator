@@ -21,8 +21,8 @@ const port = (s: Scenario, dev: string, n: number) => s.devices.find((d) => d.id
 const client = (s: Scenario, id: string) => s.clients.find((c) => c.id === id)!;
 
 describe("lesson list", () => {
-  it("has 18 lessons with unique ids", () => {
-    expect(LESSONS).toHaveLength(18);
+  it("has 20 lessons with unique ids", () => {
+    expect(LESSONS).toHaveLength(20);
     expect(new Set(LESSONS.map((l) => l.id)).size).toBe(LESSONS.length);
   });
   for (const l of LESSONS) {
@@ -35,6 +35,31 @@ describe("lesson list", () => {
       expect(floor).toEqual(plain);
     });
   }
+});
+
+describe("phase 3 lessons are solvable", () => {
+  it("switch-loop: enabling STP on one switch stops the storm", () => {
+    expect(solve("switch-loop", (s) => (s.devices.find((d) => d.id === "sw1")!.stp = { enabled: true, priority: 32768 }))).toEqual({ before: 3, fails: [] });
+  });
+  it("switch-loop: bundling both cables into a LAG also works", () => {
+    const r = solve("switch-loop", (s) => {
+      for (const id of ["sw1", "sw2"]) for (const n of [2, 3]) port(s, id, n).lag = 1;
+    });
+    expect(r.fails).toEqual([]);
+  });
+  it("switch-loop: a one-sided LAG is still a loop", () => {
+    expect(solve("switch-loop", (s) => (port(s, "sw1", 2).lag = port(s, "sw1", 3).lag = 1)).fails).toHaveLength(3);
+  });
+  it("poe-budget: turning off PoE for the light powers camera 2", () => {
+    expect(solve("poe-budget", (s) => (port(s, "sw1", 2).poe = "off"))).toEqual({ before: 1, fails: [] });
+  });
+  it("poe-budget: turning off an AP instead breaks Wi-Fi", () => {
+    const r = solve("poe-budget", (s) => {
+      port(s, "sw1", 3).poe = "off";
+      port(s, "sw1", 4).poe = "off";
+    });
+    expect(r.fails.length).toBeGreaterThan(0);
+  });
 });
 
 describe("new lessons are solvable", () => {
