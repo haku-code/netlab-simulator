@@ -25,6 +25,14 @@ const GROUPS = [
       { href: "/settings/forwarding", label: "ポートフォワード" },
     ],
   },
+  {
+    title: "システム",
+    items: [
+      { href: "/settings/sites", label: "サイト" },
+      { href: "/settings/admins", label: "管理者とロール" },
+      { href: "/settings/backup", label: "バックアップ" },
+    ],
+  },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {

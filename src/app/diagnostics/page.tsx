@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { logTraceBlock } from "@/lib/ops/store";
 import { TopologyView } from "@/components/topology/TopologyView";
 import { TraceView } from "@/components/TraceView";
 import { Button, Card, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
@@ -60,6 +61,10 @@ export default function DiagnosticsPage() {
     return { ...ran, protocol, port: portNum };
   }, [s.clients, ran, protocol, portNum, validPort]);
   const result = useMemo(() => query ? trace(s, query, states) : null, [s, query, states]);
+  // ファイアウォールで止まった通信はシステムログに記録する
+  useEffect(() => {
+    if (query && result) logTraceBlock(s, query, result);
+  }, [s, query, result]);
   const webService = ran?.srcId !== "internet" && protocol === "tcp" && (portNum === 80 || portNum === 443)
     ? s.clients.find((c) => c.id === ran?.dst && c.kind === "server")?.webService
     : undefined;

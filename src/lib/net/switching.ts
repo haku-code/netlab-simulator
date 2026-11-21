@@ -31,8 +31,10 @@ export interface PoeState {
 }
 
 export interface SwitchingState {
-  /** PoE の給電がなく電源が入っていない機器 */
+  /** PoE の給電がなく電源が入っていない機器（承認待ち・更新中で停止している機器も含む） */
   unpowered: Set<string>;
+  /** 承認待ち・更新中などで停止している機器 → 理由 */
+  down: Map<string, string>;
   unpoweredClients: Set<string>;
   poe: Map<string, PoeState>;
   /** STP がブロックしたリンク → ブロックしている側のポート */
@@ -234,6 +236,7 @@ interface Logical {
 function compute(s: Scenario): SwitchingState {
   const st: SwitchingState = {
     unpowered: new Set(),
+    down: new Map(),
     unpoweredClients: new Set(),
     poe: new Map(),
     blocked: new Map(),
@@ -245,6 +248,17 @@ function compute(s: Scenario): SwitchingState {
     lagMembers: new Map(),
   };
   computePoe(s, st);
+  for (const d of s.devices) {
+    if (!d.state) continue;
+    const why =
+      d.state === "pending"
+        ? `${d.name} は承認待ちです。デバイス画面で承認すると設定が配信され、ネットワークに参加します。`
+        : d.state === "adopting"
+          ? `${d.name} は承認中（設定を配信中）です。`
+          : `${d.name} はファームウェアを更新中のため再起動しています。`;
+    st.down.set(d.id, why);
+    st.unpowered.add(d.id);
+  }
 
   // --- 有効なリンクを論理リンク（LAG は 1 本）にまとめる ---
   const logical = new Map<string, Logical>();
@@ -410,6 +424,8 @@ export function stormReason(s: Scenario, deviceIds: string[]): string | null {
 }
 
 export function poweredOffReason(s: Scenario, deviceId: string): string | null {
+  const down = switchingState(s).down.get(deviceId);
+  if (down) return down;
   if (!switchingState(s).unpowered.has(deviceId)) return null;
   const d = findDev(s, deviceId);
   return `${d?.name ?? deviceId} の電源が入っていません（PoE 給電なし）。${poeHint(s, deviceId)}`;

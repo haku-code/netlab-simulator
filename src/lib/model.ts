@@ -48,6 +48,10 @@ export interface Device {
   poeBudgetW?: number;
   /** PoE で受電する機器の消費電力 (W)。AP の未指定は 13 W */
   poeDrawW?: number;
+  /** 運用状態: 承認待ち / 承認中 / ファームウェア更新中。未指定は稼働中 */
+  state?: "pending" | "adopting" | "upgrading";
+  /** ファームウェアのバージョン。未指定は最新 */
+  firmware?: string;
   /** フロアプラン上の位置 (m) */
   pos?: XY;
   /** AP の送信出力 */

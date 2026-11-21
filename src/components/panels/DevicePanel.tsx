@@ -75,7 +75,7 @@ export function DevicePanel({ deviceId, onClose }: { deviceId: string | null; on
               ? ([["STP", !stpOf(device).enabled ? "無効" : switchingState(s).rootId === device.id ? "ルートブリッジ" : `有効 · 優先度 ${stpOf(device).priority}`]] as [string, string][])
               : []),
             ...(poeBudget(device) > 0 ? ([["PoE", `${switchingState(s).poe.get(device.id)?.used ?? 0} / ${poeBudget(device)} W`]] as [string, string][]) : []),
-            ...(device.type === "ap" ? ([["電源", switchingState(s).unpowered.has(device.id) ? "給電なし（停止中）" : "PoE / アダプター"]] as [string, string][]) : []),
+            ...(device.type === "ap" ? ([["電源", switchingState(s).down.has(device.id) ? "停止中" : switchingState(s).unpowered.has(device.id) ? "給電なし（停止中）" : "PoE / アダプター"]] as [string, string][]) : []),
             ...(device.type === "ap" ? ([["Wi-Fi", ssids || "—"]] as [string, string][]) : []),
             ["クライアント", String(clients.length)],
           ]}

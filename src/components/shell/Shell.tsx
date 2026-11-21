@@ -12,6 +12,7 @@ import {
   Network,
   Radar,
   RotateCcw,
+  ScrollText,
   Search,
   Server,
   Settings,
@@ -27,6 +28,7 @@ import { LESSONS } from "@/lib/lessons";
 import { useStore } from "@/lib/store";
 import { useWindows } from "@/lib/windows";
 import { ClientIcon, DeviceGlyph } from "../icons";
+import { AdminMenu, AlarmBell, SiteSwitcher, ViewOnlyBadge } from "../ops";
 import { LessonPanel } from "./LessonPanel";
 import { Terminal } from "./Terminal";
 
@@ -57,6 +59,7 @@ const NAV = [
   { href: "/ports", label: "ポートマネージャー", icon: Cable },
   { href: "/clients", label: "クライアント", icon: MonitorSmartphone },
   { href: "/diagnostics", label: "パケットトレース", icon: Radar },
+  { href: "/logs", label: "ログ", icon: ScrollText },
   { href: "/lessons", label: "学習", icon: GraduationCap },
 ];
 
@@ -138,9 +141,12 @@ function Header() {
           "サンドボックス"
         )}
       </span>
+      {!lesson && <SiteSwitcher />}
+      <ViewOnlyBadge />
       <GlobalSearch />
       <div className="ml-auto flex items-center gap-1">
         <Terminal />
+        <AlarmBell />
         <Link href="/dashboard#notifications" className="relative rounded p-1.5 text-muted hover:bg-hover hover:text-fg" title="通知">
           <Bell size={17} strokeWidth={1.6} />
           {issues.length > 0 && <span className={clsx("absolute top-1 right-1 size-2 rounded-full ring-2 ring-chrome", errors ? "bg-err" : "bg-warn")} />}
@@ -155,7 +161,7 @@ function Header() {
         <button onClick={toggleTheme} className="rounded p-1.5 text-muted hover:bg-hover hover:text-fg" title="テーマ切替">
           {theme === "dark" ? <Sun size={16} strokeWidth={1.6} /> : <Moon size={16} strokeWidth={1.6} />}
         </button>
-        <span className="ml-1 flex size-7 items-center justify-center rounded-full bg-surface-2 text-[11px] font-semibold text-fg-2 ring-1 ring-line">NL</span>
+        <AdminMenu />
       </div>
     </header>
   );

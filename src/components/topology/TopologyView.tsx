@@ -318,7 +318,7 @@ export function TopologyView({
         type: "device",
         position: pos.get(d.id) ?? { x: 0, y: 0 },
         data: {
-          name: d.name, sub: switchingState(s).unpowered.has(d.id) ? "給電なし" : d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id,
+          name: d.name, sub: d.state === "pending" ? "承認待ち" : d.state === "adopting" ? "承認中…" : d.state === "upgrading" ? "更新中…" : switchingState(s).unpowered.has(d.id) ? "給電なし" : d.ip, type: d.type, hl: hlOf(!!highlight?.deviceIds.includes(d.id)), selected: selected === d.id, blocked: highlight?.failAt === d.id,
           acceptsCable: !!onEditConnection && d.type !== "ap" && d.ports.length > 0,
           dragOver: dragTarget === d.id,
         } satisfies DeviceData,
